@@ -25,7 +25,7 @@ import jax.nn as jnn
 import jax.numpy as jnp
 import numpy as np
 
-from searchless_chess.src import constants
+import constants
 
 
 class PositionalEncodings(enum.Enum):
@@ -124,7 +124,7 @@ class MultiHeadDotProductAttention(hk.Module):
     # Let b=batch_size, t=seq_len, h=num_heads, and d=num_hiddens_per_head.
     attention = jnp.einsum('bthd,bThd->bhtT', q, k)
     attention *= 1.0 / jnp.sqrt(self._num_hiddens_per_head)
-
+    # jared 
     if mask is not None:
       attention = jnp.where(mask, attention, jnp.finfo(jnp.float32).min)
 

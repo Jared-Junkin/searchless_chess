@@ -27,7 +27,7 @@ from jax import numpy as jnp
 import optax
 import orbax.checkpoint as ocp
 
-from searchless_chess.src import constants
+import constants
 
 
 def replicate(

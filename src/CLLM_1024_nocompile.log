@@ -1,0 +1,11 @@
+2024-11-08 23:19:26,395 - jaredLogger - INFO - iter 0: loss 7.7174, time 72014.69ms, mfu -100.00%
+2024-11-08 23:20:17,365 - jaredLogger - INFO - iter 100: loss 7.1572, time 669.83ms, mfu 6.15%
+2024-11-08 23:21:06,910 - jaredLogger - INFO - iter 200: loss 6.7012, time 734.79ms, mfu 6.10%
+2024-11-08 23:21:57,942 - jaredLogger - INFO - iter 300: loss 6.3936, time 858.38ms, mfu 5.97%
+2024-11-08 23:22:47,653 - jaredLogger - INFO - iter 400: loss 6.0084, time 522.93ms, mfu 6.16%
+2024-11-08 23:23:38,371 - jaredLogger - INFO - iter 500: loss 5.6254, time 587.85ms, mfu 6.24%
+2024-11-08 23:24:29,292 - jaredLogger - INFO - iter 600: loss 5.2247, time 543.68ms, mfu 6.38%
+2024-11-08 23:25:21,876 - jaredLogger - INFO - iter 700: loss 4.8913, time 525.42ms, mfu 6.52%
+2024-11-08 23:26:13,495 - jaredLogger - INFO - iter 800: loss 4.6654, time 772.25ms, mfu 6.40%
+2024-11-08 23:27:04,223 - jaredLogger - INFO - iter 900: loss 4.4673, time 543.27ms, mfu 6.52%
+2024-11-08 23:27:55,416 - jaredLogger - INFO - iter 1000: loss 4.2466, time 525.37ms, mfu 6.65%

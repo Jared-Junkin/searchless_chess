@@ -19,14 +19,18 @@ import abc
 import os
 
 import grain.python as pygrain
+from grain.python import ShardOptions
 import jax
 import numpy as np
 
-from searchless_chess.src import bagz
-from searchless_chess.src import config as config_lib
-from searchless_chess.src import constants
-from searchless_chess.src import tokenizer
-from searchless_chess.src import utils
+import bagz
+import config as config_lib
+import constants
+import tokenizer
+import utils
+from torch.utils.data.distributed import DistributedSampler
+# from torch.utils.data.distributed import Dataset, Dataloader
+from torch.utils.data import DataLoader
 
 
 def _process_fen(fen: str) -> np.ndarray:

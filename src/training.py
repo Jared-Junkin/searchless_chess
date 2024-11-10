@@ -27,10 +27,10 @@ import jax.random as jrandom
 import numpy as np
 import optax
 
-from searchless_chess.src import config as config_lib
-from searchless_chess.src import constants
-from searchless_chess.src import training_utils
-from searchless_chess.src import transformer
+import config as config_lib
+import constants
+import training_utils
+import transformer
 
 
 def train(
@@ -159,3 +159,6 @@ def train(
     checkpoint_manager.close()
 
   return jax.device_get(params)
+
+
+

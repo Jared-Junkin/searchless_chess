@@ -20,18 +20,18 @@ from collections.abc import Sequence
 from absl import app
 from absl import flags
 
-from searchless_chess.src import config as config_lib
-from searchless_chess.src import data_loader
-from searchless_chess.src import metrics_evaluator
-from searchless_chess.src import tokenizer
-from searchless_chess.src import training
-from searchless_chess.src import transformer
-from searchless_chess.src import utils
+import config as config_lib
+import data_loader
+import metrics_evaluator
+import tokenizer
+import training
+import transformer
+import utils
 
 
 _POLICY = flags.DEFINE_enum(
     'policy',
-    'action_value',
+    'behavioral_cloning',
     config_lib.POLICY_TYPES,
     'The policy used to play moves with the model.',
 )

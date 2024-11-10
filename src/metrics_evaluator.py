@@ -28,12 +28,12 @@ import haiku as hk
 import numpy as np
 import scipy.stats
 
-from searchless_chess.src import bagz
-from searchless_chess.src import config as config_lib
-from searchless_chess.src import constants
-from searchless_chess.src import utils
-from searchless_chess.src.engines import engine
-from searchless_chess.src.engines import neural_engines
+import bagz
+import config as config_lib
+import constants
+import utils
+from engines import engine
+from engines import neural_engines
 
 
 @dataclasses.dataclass

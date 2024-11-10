@@ -25,7 +25,7 @@ from grain import python as pygrain
 import haiku as hk
 import jaxtyping as jtp
 
-from searchless_chess.src import config as config_lib
+import config as config_lib
 
 
 # Integer sequences of token ids.

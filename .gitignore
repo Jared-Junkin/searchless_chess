@@ -22,3 +22,14 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# Ignore all files and folders inside the 'checkpoints' directory
+/checkpoints/
+
+# Ignore all files and folders inside the 'data' directory
+/data/
+
+# Ignore all files and folders inside the 'src/logs' directory
+/src/logs/
+
+/src/out/
