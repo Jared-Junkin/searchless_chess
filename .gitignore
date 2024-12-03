@@ -33,3 +33,11 @@ MANIFEST
 /src/logs/
 
 /src/out/
+# Ignore anything with a .log extension
+*.log
+
+# Ignore anything with a .ckpt extension
+*.ckpt
+
+# Ignore anything inside /workspace/searchless_chess/src/pythia/
+src/pythia/
