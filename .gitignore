@@ -39,5 +39,6 @@ MANIFEST
 # Ignore anything with a .ckpt extension
 *.ckpt
 
+*.txt
 # Ignore anything inside /workspace/searchless_chess/src/pythia/
 src/pythia/

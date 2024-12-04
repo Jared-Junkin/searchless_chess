@@ -22,7 +22,7 @@ wandb_project: 'jared_proj'
 wandb_run_name: 'pythia160M'                     # 'run' + str(time.time())
 
 # data
-gradient_accumulation_steps: 1             # used to simulate larger batch sizes
+gradient_accumulation_steps: 2             # used to simulate larger batch sizes
 
 # adamw optimizer
 learning_rate: 0.0003                      # max learning rate

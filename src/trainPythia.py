@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 import math
 import wandb
-from language_data_loader import build_data_loader_language, LlamaLoader
+from language_data_loader import LlamaLoader
 from config_language import LanguageDataConfig
 from test import decode
 from torch.optim import Adam
@@ -101,7 +101,7 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
     for split, loader in [('train', train_loader), ('val', test_loader)]:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            seq, attn_mask, loss_mask = next(loader)
+            seq, attn_mask, loss_mask, _, _ = next(loader)
             
             seq = seq.to(model.device)
             attn_mask = attn_mask.to(model.device)
@@ -123,7 +123,7 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
 
     with ctx if ctx else torch.no_grad():
         
-        seq, attn_mask, loss_mask = next(loader)
+        seq, attn_mask, loss_mask,_,_ = next(loader)
         seq = seq.to(model.device)
         loss_mask = loss_mask.to(model.device)
         attn_mask = attn_mask.to(model.device)
@@ -182,27 +182,27 @@ def test_data_loader(loader: LlamaLoader, iters: int)->None:
     print(f"type loader is {type(loader)}, len loader is: {len(loader)}")
     for i in range(iters):
         print(f"loading batch {i}")
-        _, _, _, = next(loader)
+        _, _, _,_,_ = next(loader)
     print(F"all loads repeated successfully")
     
-def load_dataloader(config: dict, tokenizer: PreTrainedTokenizer, split: str) -> DataLoader:
-    # set up config used to create dataloader
-    world_size = config["ddp_world_size"]
-    local_rank = config["ddp_local_rank"]
-    train_data = LanguageDataConfig(
-        batch_size= config["batch_size"],
-        tokenizer=tokenizer,
-        tokenizer_save_path=config["out_dir"],
-        shuffle=config["shuffle"],
-        worker_count=config["worker_count"],  # 0 disables multiprocessing.
-        num_return_buckets=config["num_return_buckets"],
-        policy=config["policy"],
-        split=split,
-    )
-    # build and return dataloader
-    print(f"building data loader with world size = {world_size} and local rank = {local_rank}")
-    data_iter = build_data_loader_language(config=train_data, world_size=world_size, rank=local_rank)
-    return data_iter
+# def load_dataloader(config: dict, tokenizer: PreTrainedTokenizer, split: str) -> DataLoader:
+#     # set up config used to create dataloader
+#     world_size = config["ddp_world_size"]
+#     local_rank = config["ddp_local_rank"]
+#     train_data = LanguageDataConfig(
+#         batch_size= config["batch_size"],
+#         tokenizer=tokenizer,
+#         tokenizer_save_path=config["out_dir"],
+#         shuffle=config["shuffle"],
+#         worker_count=config["worker_count"],  # 0 disables multiprocessing.
+#         num_return_buckets=config["num_return_buckets"],
+#         policy=config["policy"],
+#         split=split,
+#     )
+#     # build and return dataloader
+#     print(f"building data loader with world size = {world_size} and local rank = {local_rank}")
+#     data_iter = build_data_loader_language(config=train_data, world_size=world_size, rank=local_rank)
+#     return data_iter
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it:int, config: dict)->float:
@@ -291,8 +291,7 @@ def training(config: dict) -> None:
     config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
     model.to(device)
     ## create dataloader
-    train_loader = load_dataloader(config=config, tokenizer=tokenizer, split="train")
-    train_iter = LlamaLoader(loader=train_loader)
+    train_iter = LlamaLoader(config=config, tokenizer=tokenizer, split="train")
     model.resize_token_embeddings(len(tokenizer)) # must resize the length of the modelstoken embeddings because we've added tokens to the tokenizer
     ## create optimizer 
     optimizer = create_optimizer(model, config)
@@ -317,14 +316,13 @@ def training(config: dict) -> None:
     eval_interval = config["eval_interval"]
     always_save_checkpoint = config["always_save_checkpoint"]
     
-    test_loader = load_dataloader(config=config, tokenizer=tokenizer, split="test")
-    test_iter = LlamaLoader(loader=test_loader)
+    test_iter = LlamaLoader(config=config, tokenizer=tokenizer, split="test")
     ## unit tests to make sure the dataloaders can repeat over dataset and not raise stopIteration errors
-    # test_data_loader(loader=test_iter, iters=max_iters)
+    # test_data_loader(loader=test_iter, iters=10*len(test_iter))
     # print(f"made it through test loader")
     # test_data_loader(loader=train_iter, iters=max_iters)
     gradient_accumulation_steps = config["gradient_accumulation_steps"]
-    seq, attn_mask, loss_mask = next(train_iter)
+    seq, attn_mask, loss_mask,_,_ = next(train_iter)
     seq = seq.to(device)
     attn_mask = attn_mask.to(device)
     loss_mask=loss_mask.to(device)
@@ -451,7 +449,7 @@ def training(config: dict) -> None:
             # Get the next batch 
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
 
-            seq, attn_mask, loss_mask = next(train_iter)
+            seq, attn_mask, loss_mask,_,_ = next(train_iter)
             seq = seq.to(device)
             loss_mask = loss_mask.to(device)
             attn_mask = attn_mask.to(device)

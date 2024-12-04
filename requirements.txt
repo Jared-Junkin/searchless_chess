@@ -13,3 +13,8 @@ orbax-checkpoint
 pandas
 scipy
 typing-extensions
+
+screen
+stockfish
+wget
+
