@@ -40,5 +40,6 @@ MANIFEST
 *.ckpt
 
 *.txt
+
 # Ignore anything inside /workspace/searchless_chess/src/pythia/
 src/pythia/

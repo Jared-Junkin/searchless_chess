@@ -121,20 +121,20 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
 
         out[split] = losses.mean().item()
 
-    with ctx if ctx else torch.no_grad():
+    # with ctx if ctx else torch.no_grad():
         
-        seq, attn_mask, loss_mask,_,_ = next(loader)
-        seq = seq.to(model.device)
-        loss_mask = loss_mask.to(model.device)
-        attn_mask = attn_mask.to(model.device)
+    #     seq, attn_mask, loss_mask,_,_ = next(loader)
+    #     seq = seq.to(model.device)
+    #     loss_mask = loss_mask.to(model.device)
+    #     attn_mask = attn_mask.to(model.device)
         
-        outputs = model(**{"input_ids": seq, "attention_mask": attn_mask}) # I think this will output gibberish now becaus I haven't trained the model to understand my new tokens yet.
-        logits = outputs.logits  # Shape: (batch_size, seq_len, vocab_size). torch.argmax(logits, dim=-1) gets the token it thinks is most likely to follow the initial i tokens. 
+    #     outputs = model(**{"input_ids": seq, "attention_mask": attn_mask}) # I think this will output gibberish now becaus I haven't trained the model to understand my new tokens yet.
+    #     logits = outputs.logits  # Shape: (batch_size, seq_len, vocab_size). torch.argmax(logits, dim=-1) gets the token it thinks is most likely to follow the initial i tokens. 
 
-        predicted_tokens = torch.argmax(logits, dim=-1)
-        preds = tokenizer.decode(predicted_tokens[0])
-        indices=(~loss_mask.int()).argmax(dim=1)
-        logger.info(f"iter: {iter_num}, predicted_token: {tokenizer.decode(predicted_tokens[0][indices[0]])}, neighborhood: {tokenizer.decode(predicted_tokens[0][indices[0]-3:indices[0]+3])}, \n all_preds: {preds} \n\n\n")
+    #     predicted_tokens = torch.argmax(logits, dim=-1)
+    #     preds = tokenizer.decode(predicted_tokens[0])
+    #     indices=(~loss_mask.int()).argmax(dim=1)
+    #     logger.info(f"iter: {iter_num}, predicted_token: {tokenizer.decode(predicted_tokens[0][indices[0]])}, neighborhood: {tokenizer.decode(predicted_tokens[0][indices[0]-3:indices[0]+3])}, \n all_preds: {preds} \n\n\n")
         
                         ## to generate (inference time):
         # input_dict = {"input_ids": seq[0].unsqueeze(0), "attention_mask": attn_mask[0].unsqueeze(0)}
@@ -268,6 +268,8 @@ def set_ddp_params(config: dict) -> Tuple[dict, str, int]:
 def training(config: dict) -> None:
     # set variables
     logger = setupLogger(config=config)
+    for key, value in config.items():
+        logger.info(f"{key}: {value}\n")
     max_iters = config["max_iters"]
     out_dir = config["out_dir"]
     decay_lr = config["decay_lr"]
@@ -410,17 +412,17 @@ def training(config: dict) -> None:
                     
                                         
                     
-                    log_batch_info(
-                        iter_num=iter_num,
-                        loss=loss,
-                        predicted_tokens=predicted_tokens,
-                        best_moves=best_moves,
-                        ground_truth_probs=ground_truth_probs,
-                        chosen_answer_probs=chosen_answer_probs,
-                        config=config,
-                        tokenizer=tokenizer,
-                        logger=logger 
-                    )
+                    # log_batch_info(
+                    #     iter_num=iter_num,
+                    #     loss=loss,
+                    #     predicted_tokens=predicted_tokens,
+                    #     best_moves=best_moves,
+                    #     ground_truth_probs=ground_truth_probs,
+                    #     chosen_answer_probs=chosen_answer_probs,
+                    #     config=config,
+                    #     tokenizer=tokenizer,
+                    #     logger=logger 
+                    # )
                                                             
                                         
                 
