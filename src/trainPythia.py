@@ -15,6 +15,7 @@ import time
 import logging
 from typing import Tuple, Callable, Any
 import os
+from hooks import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false" # disabling Autotokenizer parallelism so we can do distributed training.
 # os.environ["WANDB_MODE"] = "offline" # disabling wandb attempting to sync with my account, which doesn't exist.
 from yaml import CLoader as Loader
@@ -284,6 +285,25 @@ def training(config: dict) -> None:
     model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
     tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"])
     
+    
+    
+    # hook_manager = HookManager()
+    # loghook = LogBatchHook()
+    # hook_manager.register_hook(loghook, context = {iter_num: int,
+    #                                                 seq: torch.Tensor,
+    #                                                 loss: torch.Tensor,
+    #                                                 loss_mask: torch.Tensor,
+    #                                                 logits: torch.Tensor,
+    #                                                 ctx,
+    #                                                 master_process: bool,
+    #                                                 log_interval: int,
+    #                                                 logger: logging.Logger,
+    #                                                 tokenizer: PreTrainedTokenizer
+    #                                                 }
+    #                             )
+
+    
+    
     # decrease context length of model.
     # current_positional_embeddings = model.model.get_input_embeddings().weight
     # new_positinal_embeddings = current_positional_embeddings[:config["max_context_length"]].clone()
@@ -391,41 +411,19 @@ def training(config: dict) -> None:
                 loss = loss * ~loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
                 loss = loss.sum() / (~loss_mask).sum()  # Normalize over unmasked tokens
                 loss = loss / gradient_accumulation_steps  # Normalize loss for accumulated gradients
-                
-                if iter_num % log_interval == 0 and master_process: # log a bunch of statistics
-                    
-                    # back out best move from each sample
-                    token_indices = torch.nonzero(~loss_mask) # find false values in loss mask (target tokens for prediction)
-                    row_indices = token_indices[:,0]
-                    col_indices = token_indices[:,1]
-                    best_moves = seq[row_indices, col_indices] # gives us all best moves (loss_mask[row_indices, col_indices]=all false values)
-                    
-                    ## to back predicted tokens out
-                    predicted_tokens = torch.argmax(logits, dim=-1) # get predicted tokens
-                    predicted_tokens = predicted_tokens[row_indices, col_indices]
-                    
-                    ## back out probabilities associated iwth best move, move chosen
-                    # ground_truth_logits = logits[row_indices, col_indices, best_moves] # get the logit associated with each best move (batch_size,)
-                    token_probs = torch.softmax(logits[row_indices, col_indices], dim=-1) # get the probability associated with each logit (batch_size, vocab_size)
-                    ground_truth_probs = token_probs[torch.arange(token_probs.size(0)), best_moves] # probabilities associated with each best move
-                    chosen_answer_probs = token_probs[torch.arange(token_probs.size(0)), predicted_tokens] # probabilities associated with each move chosen
-                    
-                                        
-                    
-                    # log_batch_info(
-                    #     iter_num=iter_num,
-                    #     loss=loss,
-                    #     predicted_tokens=predicted_tokens,
-                    #     best_moves=best_moves,
-                    #     ground_truth_probs=ground_truth_probs,
-                    #     chosen_answer_probs=chosen_answer_probs,
-                    #     config=config,
-                    #     tokenizer=tokenizer,
-                    #     logger=logger 
-                    # )
-                                                            
-                                        
-                
+            # hook_manager.call_hooks(
+            #     iter_num=iter_num,
+            #     seq=seq,
+            #     loss=loss,
+            #     loss_mask=loss_mask,
+            #     logits=logits,
+            #     ctx=ctx,
+            #     master_process=master_process,
+            #     log_interval=log_interval,
+            #     logger=logger,
+            #     tokenizer=tokenizer                    
+            # )
+
                 ##miscellaneous useful things
                 ## remember that false = logical 1
                 # tokenizer.decode(seq[0]) # gives the text prompt
