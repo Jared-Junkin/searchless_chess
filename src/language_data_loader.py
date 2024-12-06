@@ -48,17 +48,17 @@ class BagDataset(Dataset):
         all_moves = utils._compute_all_possible_actions()
         all_moves = list(all_moves[0].keys())
         original_mappings = {move:tokenizer(move, add_special_tokens=False)["input_ids"] for move in all_moves}     # embedding of 'g1h2' before special tokens added. 'g1h2': [70, 16, 71, 17]
-        tokenizer.add_special_tokens({"additional_special_tokens": all_moves})                                      # adding tokens
+        # tokenizer.add_special_tokens({"additional_special_tokens": all_moves})                                      # adding tokens
         self._tokenizer = tokenizer                                                                                 # storing tokenizer
-        final_mappings = {move: tokenizer.convert_tokens_to_ids(move) for move in all_moves}                        # embedding of 'g1h2 after special tokens added: 'g1h2': [128413]
+        # final_mappings = {move: tokenizer.convert_tokens_to_ids(move) for move in all_moves}                        # embedding of 'g1h2 after special tokens added: 'g1h2': [128413]
         
+        ## in this branch, we don't use new tokens
+        # self._move_encodings = {move: original_mappings[move] +                                                     # 'g1h2': [70, 16, 71, 17]
+        #                        self._tokenizer(": ", add_special_tokens=False)["input_ids"] +                       # tokenizer(": ")
+        #                        [final_mappings[move]] + 
+        #                        self._tokenizer(", ", add_special_tokens=False)["input_ids"] for move in all_moves}  # 'g1h2': [70, 16, 71, 17] + tokenizer(": ") + [128413] + ", "
         
-        self._move_encodings = {move: original_mappings[move] + 
-                               self._tokenizer(": ", add_special_tokens=False)["input_ids"] + 
-                               [final_mappings[move]] + 
-                               self._tokenizer(", ", add_special_tokens=False)["input_ids"] for move in all_moves}  # 'g1h2': [70, 16, 71, 17] + tokenizer(": ") + [128413] + ", "
-        
-
+        self._move_encodings = {move: original_mappings[move] + self._tokenizer(", ", add_special_tokens=False)["input_ids"] for move in all_moves}
 
         # define pretokenized prompt
         for component in self._prompt:
@@ -137,7 +137,7 @@ class BagDataset(Dataset):
         # Copy tokens into the preallocated array (up to its size limit)
         tokens_to_copy = min(len(prompt_tokens), len(predefined_array))
         predefined_array[:tokens_to_copy] = prompt_tokens[:tokens_to_copy]
-        predefined_attn_mask[:tokens_to_copy-1] = False # attend to all non-padding tokens except the target token that we're trying to predict
+        predefined_attn_mask[:tokens_to_copy-len(move_tokens)] = False # attend to all non-padding tokens except the target tokens we're trying to predict (the last four on this git branch)
         
         ## this code set the final entry in the array (after padding) to be the target value we wanted to predict. 
         ## I've decided it's better practice to make the final value the model wants to predict the token immediately following the last token in the prompt
@@ -147,7 +147,7 @@ class BagDataset(Dataset):
         
         # set loss mask to be false for just the targe ttoken @ predefined_array[tokens_to_copy-1] (the last non padding entry in the array)
         predefined_loss_mask = np.copy(self._loss_mask)
-        predefined_loss_mask[tokens_to_copy-1] = False # calculate loss on only location of token we want to predict
+        predefined_loss_mask[tokens_to_copy-len(move_tokens):tokens_to_copy] = False # calculate loss on only location of token we want to predict
         
         # return predefined array.
         return predefined_array, predefined_attn_mask, predefined_loss_mask

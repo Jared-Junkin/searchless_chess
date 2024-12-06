@@ -639,39 +639,39 @@ CODEX = InferenceTimeBehavioralCloning()
 if __name__ == "__main__":
     
     ## playing a human game aginst the bot
-    start = 1 # forcing human to play black
-    if start == 0: # human is white
-        color = "white"
-        player_one = humanPlayer()
-        player_one_recording_name = "human"
-        player_two_recording_name = player_ones[0]
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-    else: # human is black
-        color = "black"
-        player_one_recording_name = player_ones[0]
-        player_two_recording_name = "human"
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-        player_two = humanPlayer()
-    print(f"Starting game against model {player_ones[0]}. You are {color}. Good luck!")
-    play_game_human(player_one=player_one, player_two=player_two)
+    # start = 1 # forcing human to play black
+    # if start == 0: # human is white
+    #     color = "white"
+    #     player_one = humanPlayer()
+    #     player_one_recording_name = "human"
+    #     player_two_recording_name = player_ones[0]
+    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+    # else: # human is black
+    #     color = "black"
+    #     player_one_recording_name = player_ones[0]
+    #     player_two_recording_name = "human"
+    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+    #     player_two = humanPlayer()
+    # print(f"Starting game against model {player_ones[0]}. You are {color}. Good luck!")
+    # play_game_human(player_one=player_one, player_two=player_two)
     
     
     ## play 100 games against each stockfish agent to test how strong the model really is
-    # stockfish_play_time=0.1
-    # num_games=100
-    # player_one_recording_name=player_ones[0]
-    # for i in range(11):
-    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-    #     player_two_recording_name = "stockfish" + str(i)
-    #     player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
-    #     play_game(player_one, player_two, num_games)
+    stockfish_play_time=0.1
+    num_games=100
+    player_one_recording_name=player_ones[0]
+    for i in range(11):
+        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+        player_two_recording_name = "stockfish" + str(i)
+        player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+        play_game(player_one, player_two, num_games)
     
-    ## initial testing. playing a few games against a single stockfish agent of hardcoded level
-    # for player in player_ones:
-    #     player_one_recording_name = player
-    #     num_games = 10
-    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-    #     player_two = StockfishPlayer(skill_level=25, play_time=stockfish_play_time)
-    #     play_game(player_one, player_two, num_games)
+    # initial testing. playing a few games against a single stockfish agent of hardcoded level
+    for player in player_ones:
+        player_one_recording_name = player
+        num_games = 10
+        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+        player_two = StockfishPlayer(skill_level=25, play_time=stockfish_play_time)
+        play_game(player_one, player_two, num_games)
         
     
