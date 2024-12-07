@@ -11,7 +11,7 @@ import random
 # NOTE: LLAMA AND NANOGPT ARE EXPERIMENTAL PLAYERS that most people won't need to use
 # They are commented by default to avoid unnecessary dependencies such as pytorch.
 # from llama_module import BaseLlamaPlayer, LocalLlamaPlayer, LocalLoraLlamaPlayer
-from jared_models.nanoGPT  import NanoGptPlayer
+from jared_models.pythiaPlayer  import PythiaPlayer
 # import gpt_query
 
 from typing import Optional, Tuple
@@ -120,13 +120,6 @@ class StockfishPlayer(Player):
     def close(self):
         self._engine.quit()
 
-
-def get_gpt_response(game_state: str, model: str, temperature: float) -> Optional[str]:
-    # trying to prevent what I believe to be rate limit issues
-    if model == "gpt-4":
-        time.sleep(0.4)
-    response = gpt_query.get_gpt_response(game_state, model, temperature)
-    return response
 
 
 def get_move_from_gpt_response(response: Optional[str]) -> Optional[str]:
@@ -634,7 +627,8 @@ recording_file = "logs/determine.csv"  # default recording file. Because we are 
 # player_ones = ['ckpt12000.pt']# player_ones = ["ckpt600000.pt"]
 player_ones = ['ckpt' + str(600000) + ".pt"]
 # player_two_recording_name = "stockfish"
-
+tokenizer_config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt40000"
+config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt40000"
 CODEX = InferenceTimeBehavioralCloning()
 if __name__ == "__main__":
     
@@ -661,17 +655,20 @@ if __name__ == "__main__":
     num_games=100
     player_one_recording_name=player_ones[0]
     for i in range(11):
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+        player_one = PythiaPlayer(
+            tokenizer_config_path=tokenizer_config_path,
+            model_config_path=config_path,
+        )
         player_two_recording_name = "stockfish" + str(i)
         player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
         play_game(player_one, player_two, num_games)
     
-    # initial testing. playing a few games against a single stockfish agent of hardcoded level
-    for player in player_ones:
-        player_one_recording_name = player
-        num_games = 10
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-        player_two = StockfishPlayer(skill_level=25, play_time=stockfish_play_time)
-        play_game(player_one, player_two, num_games)
+    # # initial testing. playing a few games against a single stockfish agent of hardcoded level
+    # for player in player_ones:
+    #     player_one_recording_name = player
+    #     num_games = 10
+    #     player_one = PythiaPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+    #     player_two = StockfishPlayer(skill_level=25, play_time=stockfish_play_time)
+    #     play_game(player_one, player_two, num_games)
         
     

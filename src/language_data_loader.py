@@ -88,13 +88,13 @@ class BagDataset(Dataset):
         # create and save the loss mask
         self._loss_mask: torch.Tensor = torch.full(
             size=(total_prompt_length,),
-            fill_value=True,
+            fill_value=False,
             dtype=bool,
         )
         
         self._attn_mask: torch.Tensor = torch.full(
             size=(total_prompt_length,),
-            fill_value=True,
+            fill_value=False,
             dtype=bool,
         )
     
@@ -137,7 +137,7 @@ class BagDataset(Dataset):
         # Copy tokens into the preallocated array (up to its size limit)
         tokens_to_copy = min(len(prompt_tokens), len(predefined_array))
         predefined_array[:tokens_to_copy] = prompt_tokens[:tokens_to_copy]
-        predefined_attn_mask[:tokens_to_copy-len(move_tokens)] = False # attend to all non-padding tokens except the target tokens we're trying to predict (the last four on this git branch)
+        predefined_attn_mask[:tokens_to_copy-len(move_tokens)] = True # attend to all non-padding tokens except the target tokens we're trying to predict (the last four on this git branch)
         
         ## this code set the final entry in the array (after padding) to be the target value we wanted to predict. 
         ## I've decided it's better practice to make the final value the model wants to predict the token immediately following the last token in the prompt
@@ -147,7 +147,7 @@ class BagDataset(Dataset):
         
         # set loss mask to be false for just the targe ttoken @ predefined_array[tokens_to_copy-1] (the last non padding entry in the array)
         predefined_loss_mask = np.copy(self._loss_mask)
-        predefined_loss_mask[tokens_to_copy-len(move_tokens):tokens_to_copy] = False # calculate loss on only location of token we want to predict
+        predefined_loss_mask[tokens_to_copy-len(move_tokens):tokens_to_copy] = True # calculate loss on only location of token we want to predict
         
         # return predefined array.
         return predefined_array, predefined_attn_mask, predefined_loss_mask
@@ -181,8 +181,9 @@ class LlamaLoader:
                  split: str,
                  data_dir: str = "/workspace/searchless_chess/data",
                  data_source_name: str="behavioral_cloning_data.bag",
+                 repeat: bool = True
                  )->None:
-        
+        self.repeat = repeat
         world_size = config["ddp_world_size"]
         rank = config["ddp_local_rank"]
         config = LanguageDataConfig(
@@ -251,14 +252,17 @@ class LlamaLoader:
     def __len__(self)->int:
         return len(self._loader)
     def __next__(self)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        try:
-            seq, attn_mask, loss_mask, fen, move = next(self._loader_iter)
-        except StopIteration:
-            # TODO: log that you're starting over for loader_name 
-            self._loader_iter = iter(self._loader)
-            seq, attn_mask, loss_mask, fen, move = next(self._loader_iter)
+        if self.repeat:
+            try:
+                seq, attn_mask, loss_mask, fen, move = next(self._loader_iter)
+            except StopIteration:
+                # TODO: log that you're starting over for loader_name 
+                self._loader_iter = iter(self._loader)
+                seq, attn_mask, loss_mask, fen, move = next(self._loader_iter)
 
-        return seq, attn_mask, loss_mask, fen, move
-
-            
+            return seq, attn_mask, loss_mask, fen, move
+        # if no repeat, raise stopiteration exception
+        else:
+            seq, attn_mask, loss_mask, fen, move = next(self._loader_iter)
+            return seq, attn_mask, loss_mask, fen, move
 

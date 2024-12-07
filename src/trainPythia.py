@@ -399,7 +399,7 @@ def training(config: dict) -> None:
             with ctx:
                 
                 # Pass input through the model
-                outputs = model(**{"input_ids": seq, "attention_mask": ~attn_mask, "output_attentions": True}) # I think this will output gibberish now becaus I haven't trained the model to understand my new tokens yet.
+                outputs = model(**{"input_ids": seq, "attention_mask": attn_mask, "output_attentions": True}) # I think this will output gibberish now becaus I haven't trained the model to understand my new tokens yet.
                 logits = outputs.logits  # Shape: (batch_size, seq_len, vocab_size). torch.argmax(logits, dim=-1) gets the token it thinks is most likely to follow the initial i tokens. 
 
                 # Compute loss
@@ -409,14 +409,19 @@ def training(config: dict) -> None:
 
                 # Apply the loss mask
                 loss = loss.view(seq.size(0), seq.size(1))  # Reshape to (batch_size, seq_len)
-                loss = loss * ~loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
-                loss = loss.sum() / (~loss_mask).sum()  # Normalize over unmasked tokens
+                loss = loss * loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
+                loss = loss.sum() / (loss_mask).sum()  # Normalize over unmasked tokens
                 loss = loss / gradient_accumulation_steps  # Normalize loss for accumulated gradients
                 # this isn't valid SAN, right
                 # 2024-12-06 01:33:49,389 - jaredLogger - INFO - g2g1q               g2g15               0.8014              0.8968              
                 # 2024-12-06 01:36:48,430 - jaredLogger - INFO - h7h8r               h7h8e               0.7999              0.9918   
                 # what's up with these? there must be a flaw in my trainng loader. 
+                '''
                 
+                    token_indices = torch.nonzero(attn_mask[0])
+    logger.info(f"Seq is {seq[token_indices]}")
+                
+                '''
                 if iter_num % eval_interval == 0 and master_process:
                     with torch.no_grad():
                         attention_weights = outputs.attentions  # List of attention tensors
@@ -475,7 +480,8 @@ def training(config: dict) -> None:
                                     tokenizer=tokenizer,
                                     logger=logger,
                                     attended_tokens=attended_tokens,
-                                    attn_mask = attn_mask)
+                                    attn_mask = attn_mask,
+                                    seq = seq[0])
                     # Convert grouped lists to tensors if needed
                     # For example: grouped_token_probs = [torch.stack(group) for group in grouped_token_probs]
 
@@ -560,7 +566,7 @@ def training(config: dict) -> None:
     if ddp:
         destroy_process_group()
     
-def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_probs, chosen_answer_probs, config, tokenizer, logger, attended_tokens, attn_mask):
+def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_probs, chosen_answer_probs, config, tokenizer, logger, attended_tokens, attn_mask, seq):
     # Helper function for conditional formatting of probabilities
     def format_prob(prob):
         return f"{prob:.4e}" if prob < 0.0001 else f"{prob:.4f}"
@@ -593,8 +599,9 @@ def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_pr
         f"Mean chosen move prob: {torch.mean(torch.tensor(avg_chosen_move_probs)):.4f}"
     )
     logger.info(f"Attended tokens for sample 0: {attended_tokens}")
-    logger.info(f"Attention mask for sample 0: {~attn_mask[0]}")
-
+    logger.info(f"Attention mask for sample 0: {attn_mask[0]}")
+    token_indices = torch.nonzero(attn_mask[0])
+    logger.info(f"Seq is {seq[token_indices].squeeze(1)}")
     # Header for the table columns
     logger.info(f"{'Best Move':<20}{'Chosen Move':<20}{'Best Move Prob':<20}{'Chosen Move Prob':<20}")
 

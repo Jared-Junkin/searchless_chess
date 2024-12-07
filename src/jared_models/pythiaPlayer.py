@@ -17,12 +17,18 @@ import pickle
 from typing import List
 import chess
 import chess.engine
+
 STOCKFISH_PATH = "/usr/games/stockfish"
 DRAW_FILE = "draws.txt"
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 class PythiaPlayer:
-    def __init__(self, tokenizer_config_path: str, model_config_path: str, draws_okay: bool = False, prompt_components: Optional[List[str]]=None) -> None:
+    def __init__(self, 
+                 tokenizer_config_path: str, 
+                 model_config_path: str, 
+                 draws_okay: bool = False, 
+                 prompt_components: Optional[List[str]]=None
+    ) -> None:
         # this MUST be the same prompt the model was fine-tuned on (I assume. I actually haven't tested how resilient it is to different prompts)
         if not prompt_components:
             # default prompt
@@ -37,10 +43,28 @@ class PythiaPlayer:
             raise ValueError(f"Expected prompt_components to have a length of 3, but got len {len(prompt_components)}.")
         
         self.model = AutoModelForCausalLM.from_pretrained(model_config_path)
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_config_path)
+        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_config_path)
         self.helper = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
         self.draws_okay = draws_okay
-    
+        self._pretokenized_prompt = []
+        for component in prompt_components:
+            token_ids = self._tokenizer(component, add_special_tokens=False)["input_ids"]
+            self._pretokenized_prompt.append(np.array(token_ids, dtype=np.int32))
+            
+        static_prompt_length = sum(len(comp) for comp in self._pretokenized_prompt) 
+        max_encoding_length = 6     # hard coding for now. what it was for training
+        dynammic_prompt_length = max_encoding_length * 80 # (empircally, there aren't any board states in dataset with more legal moves than this)                                 # max length needed for dynammic prompt (there will never by more than 128 legal moves)
+        total_prompt_length = static_prompt_length + dynammic_prompt_length + 1  
+        print(f"total prompt length is {total_prompt_length}")
+        pad_token_id = self._tokenizer.convert_tokens_to_ids("<|pad|>")                         # get token id of pad character
+        self._predefined_array = np.full(                                                    # This array is going to be our prompty. pre-definining it so we don't have ot initialize each time
+            (total_prompt_length,), pad_token_id, dtype=np.int32
+        )
+        self._attn_mask: torch.Tensor = torch.full(
+            size=(total_prompt_length,),
+            fill_value=True,
+            dtype=bool,
+        )
     # get a move from the agent and return it in the proper format
     def get_move(self, board: chess.Board, game_state: str, temperature: float) -> str:
         if self.draws_okay:
@@ -69,8 +93,42 @@ class PythiaPlayer:
         
     def get_response(self, board: chess.Board, temperature: float) -> str:
         legal_moves = [str(m) for m in board.legal_moves]
+        info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=len(legal_moves))
+        best_move = info[0]['pv'][0].uci()
+        move_tokens = np.array(self._tokenizer(best_move, add_special_tokens=False)['input_ids'], dtype=np.int32)
         
-
+        fen = board.fen()
+        fen_tokens = np.array(self._tokenizer(fen, add_special_tokens=False)['input_ids'], dtype=np.int32)
+        legal_move_tokens = np.array([self._tokenizer(move + ", ", add_special_tokens=False)["input_ids"] for move in legal_moves])
+        # one way to know for sure that it works. the model cannot cheat now.
+        legal_move_tokens = np.concatenate(legal_move_tokens, axis=0)
+        prompt_tokens = np.concatenate(
+            [
+                self._pretokenized_prompt[0],
+                fen_tokens,
+                self._pretokenized_prompt[1],
+                legal_move_tokens,
+                self._pretokenized_prompt[2],
+                np.zeros_like(move_tokens)
+            ]
+        )
+        predefined_array = np.copy(self._predefined_array)
+        tokens_to_copy = min(len(prompt_tokens), len(predefined_array))
+        predefined_array[:tokens_to_copy] = prompt_tokens[:tokens_to_copy]
+        predefined_attn_mask = np.copy(self._attn_mask)
+        predefined_attn_mask[:tokens_to_copy] = False
+        
+        # generate best move
+        predefined_array = torch.tensor(predefined_array).unsqueeze(0)
+        predefined_attn_mask = torch.tensor(predefined_attn_mask).unsqueeze(0)
+        generated_outputs = self.model.generate(
+            input_ids=predefined_array,
+            attention_mask=predefined_attn_mask,
+            max_length=predefined_array.size(1)+5,  # Ensure the generated sequence matches the input length
+        )
+        print(self._tokenizer.batch_decode(generated_outputs))
+        response = generated_outputs[tokens_to_copy: tokens_to_copy+4]
+        
         top_k = 200  # retain only the top_k most likely tokens, clamp others to have 0 probability
         start_ids = self.encode(fen)
 

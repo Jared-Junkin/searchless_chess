@@ -67,6 +67,7 @@ PROMPTS = {
     # ],
 }
 
+@torch.no_grad()
 def prompt_evaluation(model: AutoModelForCausalLM, data_iter: LlamaLoader, num_batches: int=2) -> None:
     # calculate exhaustive list of all valid san moves
     file_path = "prompt_statistics.txt"
@@ -81,19 +82,65 @@ def prompt_evaluation(model: AutoModelForCausalLM, data_iter: LlamaLoader, num_b
     # iterate over all prompt templates
     for prompt_name, prompt_template in PROMPTS.items():
         print(f"prompt template is {prompt_template}")
-        prompt_statistics = np.zeros(shape=(6,1))
+        batch_statistics = {
+            "num_moves": 0,
+            "Valid_San": 0,
+            "Legal_Move": 0,
+            "Best_Move": 0,
+            "First_move": 0,
+            "Best_move_is_first_move": 0
+        }
+                
+
 
         # iterate over all batches we've decided to load
         for _ in range(num_batches):
-            seq, attn_mask, loss_mask, fen_batch, best_move_batch = next(data_iter)
-            outputs = model(**{"input_ids": seq, "attention_mask": attn_mask}) 
-            logits = outputs.logits  # Shape: (batch_size, seq_len, vocab_size). torch.argmax(logits, dim=-1) gets the token it thinks is most likely to follow the initial i tokens. 
-            indices=(~loss_mask.int()).argmax(dim=1)
-            predicted_tokens = torch.argmax(logits, dim=-1)
-            # iterate over all game states in batch
+
+            try:
+                seq, attn_mask, loss_mask, fen_batch, best_move_batch = next(data_iter)
+            except StopIteration:
+                print(f"Out of")
+                batch_statistics["Best_Move"]/=batch_statistics["num_moves"]
+                batch_statistics["Valid_San"]/=batch_statistics["num_moves"]
+                batch_statistics["First_move"]/=batch_statistics["num_moves"]
+                batch_statistics["Best_move_is_first_move"]/=batch_statistics["num_moves"]
+                batch_statistics["Legal_Move"]/=batch_statistics["num_moves"]
+                with open(file_path, "a") as f:
+                    f.write(f"Prompt: {prompt_name}\n")
+                    f.write(f"Statistics:{batch_statistics}")
+                f.close()
+                helper.close()
+                return
+            generated_outputs = model.generate(
+                input_ids=seq,
+                attention_mask=attn_mask,
+                max_length=seq.size(1)+5,  # Ensure the generated sequence matches the input length
+                pad_token_id=model.config.pad_token_id,
+                eos_token_id=model.config.eos_token_id
+            )
+
+            # Convert generated outputs to predicted tokens
+            generated_tokens = generated_outputs  # Shape: (batch_size, seq_len)
+
+            # Identify indices where loss_mask is False
+            token_indices = torch.nonzero(~loss_mask)  # Shape: (num_false, 2)
+            row_indices = token_indices[:, 0]  # Batch index
+            col_indices = token_indices[:, 1]  # Token position index
+
+            # Extract predictions for tokens where loss_mask is False
+            filtered_tokens = generated_tokens[row_indices, col_indices]
+
+            # Group predictions by batch row
+            unique_rows = torch.unique(row_indices)
+            grouped_filtered_tokens = []  # To store the grouped tokens for each batch element
+            for row in unique_rows:
+                current_row_mask = (row_indices == row)
+                row_filtered_tokens = filtered_tokens[current_row_mask]
+                grouped_filtered_tokens.append(row_filtered_tokens.tolist())  # Convert to list
+       
             i=0
             for fen, best_move in zip(fen_batch, best_move_batch):
-                prediction = data_iter.getTokenizer().decode(predicted_tokens[i][indices[i]])
+                prediction = data_iter.getTokenizer().decode(grouped_filtered_tokens[i])
                 
                 
                 board.set_fen(fen)
@@ -130,72 +177,38 @@ def prompt_evaluation(model: AutoModelForCausalLM, data_iter: LlamaLoader, num_b
                     # Append the SAN move and numeric score
                     best_moves_san.append((san_move, numeric_score))
 
-                # Convert best_moves_san to UCI
-                best_moves_uci = [(board.parse_san(move).uci(), score) for move, score in best_moves_san] # -40 centipawn score = -0.4 in chess.com evaluation (which is in pawn score)
-                best_moves_uci_only = [board.parse_san(move).uci() for move, score in best_moves_san] # same as line above except this just returns move and not evaluation
-
                 candidates = [prediction]
                 
                 
-                
-                # # Combine template parts into a single prompt string
-                # prompt = "".join(prompt_template).format(
-                #     fen=fen,
-                #     moves=", ".join(legal_moves),
-                #     best_move=best_move
-                # )
+            
 
-                # # Tokenize the prompt and pass it through the model
-                # inputs = tokenizer(prompt, return_tensors="pt")
-                # num_tokens = inputs["input_ids"].shape[1]
-                # outputs = model.generate(**inputs, max_length=num_tokens + 7)
-                # generated_tokens = outputs[0][num_tokens:]  # skip the prompt tokens and extract only the generated tokens.s
-                # decoded_output = tokenizer.decode(generated_tokens[0], skip_special_tokens=False)
-                
-                # # Print prompt and output for debugging purposes
-                # print(f"Prompt ({prompt_name}): {prompt}")
-                # print(f"Model output: {decoded_output}")
-                # print("-" * 80)
-                
                 # candidates = decoded_output.split(" ")
+                batch_statistics["num_moves"]+=1
                 if any(candidate.strip() in valid_san_moves for candidate in candidates): # outputted a valid SAN move
-                    prompt_statistics[0] += 1 
+                    batch_statistics["Valid_San"]+=1
                 if any(candidate.strip() in legal_moves for candidate in candidates): # AI has outputted valid SAN that is also a legal move in the current board configuration
-                    prompt_statistics[1] += 1
-                    legal_move = next(candidate.strip() for candidate in candidates if candidate.strip() in legal_moves)
-                    move_position = best_moves_uci_only.index(legal_move)
-                    centipawn_delta = abs(best_moves_uci[move_position][1] - best_moves_uci[0][1]) # difference in centipawn evaluation betyween best move and move chosen. should go to 0 with perfect play. can use abs because impossible to do better than best move in behavioral cloning.
-                    prompt_statistics[4] += centipawn_delta                           
-                else:
-                    prompt_statistics[4] += 1000
+                    batch_statistics["Legal_Move"] += 1
+                   
                 if any(candidate.strip() == best_move for candidate in candidates): # AI has outputted the best move correctly
-                    prompt_statistics[2] += 1  
+                    batch_statistics["Best_Move"] += 1  
                 if any(candidate.strip() == legal_moves[0] for candidate in candidates):    # AI has chosen the first legal move that was listed
-                    prompt_statistics[3] += 1
-                prompt_statistics[5]+=1 # 
-                print(f"best_move: {best_move}, prediction: {prediction}, legal move? {prediction in legal_moves}")
+                    batch_statistics["First_move"] += 1
+                if legal_moves[0] == best_move:
+                    batch_statistics["Best_move_is_first_move"]+=1
                 i+=1
-            print("done batch")
-        # ai likes to put numbers like 1. nxe5 in front of the correct move (nxe5). strip away these numbers
-        # just say the agents move is the longest string in " ".split(outputs[0])
-        # calculate for each prompt % of responses meeting the three  criteria:
-            # 1. it is valid san. do this exact thing. valid_san = move in set(utils)
-            # 2. is it a legal move given the current board configuration
-            # 3. is it just printing the first legal move every time? 
-            # 4. is it printing the best move? 
-            # 5. what is the average position in the best moves matrix? 
-        # Normalize statistics by dividing entries 0:n-1 by the last element
-        if prompt_statistics[5] != 0:  # Guard to ensure no division by zero
-            prompt_statistics[:-1] /= prompt_statistics[5]
+                print(f"done sample {i}")
 
-        # Write the statistics to a file
+            print("done batch")
+        batch_statistics["Best_Move"]/=batch_statistics["num_moves"]
+        batch_statistics["Valid_San"]/=batch_statistics["num_moves"]
+        batch_statistics["First_move"]/=batch_statistics["num_moves"]
+        batch_statistics["Best_move_is_first_move"]/=batch_statistics["num_moves"]
+        batch_statistics["Legal_Move"]/=batch_statistics["num_moves"]
         with open(file_path, "a") as f:
             f.write(f"Prompt: {prompt_name}\n")
-            f.write("Statistics:\n")
-            for i, stat in enumerate(prompt_statistics.flatten()):
-                f.write(f"Statistic {i}: {stat}\n")
-            f.write("-" * 40 + "\n")
+            f.write(f"Statistics:{batch_statistics}")
         f.close()
+        helper.close()
         return
 if __name__ == "__main__":
     config_file = "/workspace/searchless_chess/src/config_pythia.yaml"
@@ -224,15 +237,15 @@ if __name__ == "__main__":
         config["ddp_local_rank"] = 0
         config["ddp_rank"] = 0
 
-    config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt152000"
+    config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt40000"
     model = AutoModelForCausalLM.from_pretrained(config_path)
     tokenizer = AutoTokenizer.from_pretrained(config_path)
-    data_iter = LlamaLoader(config=config, tokenizer=tokenizer, split="train")
+    data_iter = LlamaLoader(config=config, tokenizer=tokenizer, split="test", repeat=False)
     if ddp:
         init_process_group(backend=config['backend'])
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}['bfloat16']
     ctx = nullcontext() if config['device_type'] == 'cpu' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
     with ctx if ctx else torch.no_grad():  # Use ctx if provided, else default no_grad context
-        prompt_evaluation(model, data_iter)
+        prompt_evaluation(model, data_iter, num_batches=200)
     if ddp:
         destroy_process_group()

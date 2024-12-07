@@ -14,7 +14,7 @@ log_interval: 10
 eval_iters: 0
 eval_only: False                          # if True, script exits right after the first eval
 always_save_checkpoint: True               # if True, always save a checkpoint after each eval
-log_path: "/workspace/searchless_chess/src/pythia/logs/train_7.log"
+log_path: "/workspace/searchless_chess/src/pythia/logs/train_8.log"
 
 # wandb logging
 wandb_log: False                           # disabled by default. Don't want to make an account
