@@ -116,7 +116,7 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
 
                 # Apply the loss mask
                 loss = loss.view(seq.size(0), seq.size(1))  # Reshape to (batch_size, seq_len)
-                loss = loss * ~loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
+                loss = loss * loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
                 loss = loss.sum() / (~loss_mask).sum()  # Normalize over unmasked tokens
             losses[k] = loss.item()
 
@@ -399,19 +399,27 @@ def training(config: dict) -> None:
             with ctx:
                 
                 # Pass input through the model
-                outputs = model(**{"input_ids": seq, "attention_mask": attn_mask, "output_attentions": True}) # I think this will output gibberish now becaus I haven't trained the model to understand my new tokens yet.
-                logits = outputs.logits  # Shape: (batch_size, seq_len, vocab_size). torch.argmax(logits, dim=-1) gets the token it thinks is most likely to follow the initial i tokens. 
+                                        # seq_tmp = seq.detach().clone()
+                        # token_indices = torch.nonzero(loss_mask) # find false values in loss mask (target tokens for prediction)
+                        # seq_tmp[loss_mask == 1]=0
+                        
+                seq_tmp = seq.detach().clone()
+                seq_tmp[loss_mask == 1] = 0  # Replace target tokens in the input with pad (0)
 
-                # Compute loss
-                # Let's assume `labels` is a tensor of the same shape as `seq`, where the target tokens are stored.
-                loss_fn = torch.nn.CrossEntropyLoss(reduction='none')  # Use 'none' to apply loss mask
-                loss = loss_fn(logits.view(-1, logits.size(-1)), seq.view(-1))  # Shape: (batch_size * seq_len)
+                outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=True)
+                logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 
-                # Apply the loss mask
-                loss = loss.view(seq.size(0), seq.size(1))  # Reshape to (batch_size, seq_len)
-                loss = loss * loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
-                loss = loss.sum() / (loss_mask).sum()  # Normalize over unmasked tokens
-                loss = loss / gradient_accumulation_steps  # Normalize loss for accumulated gradients
+                # Shift labels by one
+                shifted_labels = seq[:, 1:].clone()      # The model at position i predicts seq[i+1]
+                shifted_mask = loss_mask[:, 1:]          # Shift mask as well
+                logits = logits[:, :-1, :]               # Align logits so they match shifted_labels
+
+                # Set non-target positions to -100
+                shifted_labels[shifted_mask == 0] = -100
+
+                loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                loss = loss_fn(logits.reshape(-1, logits.size(-1)), shifted_labels.view(-1))
+                loss = loss / gradient_accumulation_steps
                 # this isn't valid SAN, right
                 # 2024-12-06 01:33:49,389 - jaredLogger - INFO - g2g1q               g2g15               0.8014              0.8968              
                 # 2024-12-06 01:36:48,430 - jaredLogger - INFO - h7h8r               h7h8e               0.7999              0.9918   
@@ -425,63 +433,155 @@ def training(config: dict) -> None:
                 if iter_num % eval_interval == 0 and master_process:
                     with torch.no_grad():
                         attention_weights = outputs.attentions  # List of attention tensors
-                        attended_tokens = torch.argmax(attention_weights[0][0, 0], dim=-1)  
-                        # back out best move from each sample
-                        token_indices = torch.nonzero(~loss_mask) # find false values in loss mask (target tokens for prediction)
-                        row_indices = token_indices[:,0]
-                        col_indices = token_indices[:,1]
-                        best_moves = seq[row_indices, col_indices] # gives us all best moves (loss_mask[row_indices, col_indices]=all false values)
-                        grouped_best_moves = []
-                        unique_rows = torch.unique(row_indices)
-                        for row in unique_rows:
-                            grouped_best_moves.append(best_moves[row_indices==row].tolist())
-                        
-                        ## to back predicted tokens out
-                        predicted_tokens = torch.argmax(logits, dim=-1) # get predicted tokens
-                        predicted_tokens = predicted_tokens[row_indices, col_indices]
-                        
-                                        
-                        # Group token probabilities by row
+                        attended_tokens = torch.argmax(attention_weights[0][0, 0], dim=-1)
 
-                        # grouped_token_probs = []
+                        # We have already computed:
+                        # shifted_labels = seq[:, 1:].clone()
+                        # shifted_mask = loss_mask[:, 1:]
+                        # logits = logits[:, :-1, :] (done before computing the loss)
+                        #
+                        # Now we must extract the indices of the target tokens from shifted_mask.
+                        
+                        token_indices = torch.nonzero(shifted_mask)  # Indices of tokens we care about
+                        row_indices = token_indices[:, 0]
+                        col_indices = token_indices[:, 1]
+
+                        # best_moves are the ground-truth tokens from shifted_labels at these positions
+                        best_moves = shifted_labels[row_indices, col_indices]
+
+                        # predicted_tokens are the model's predictions at these positions
+                        full_predicted_tokens = torch.argmax(logits, dim=-1)  # (batch, seq_len)
+                        predicted_tokens = full_predicted_tokens[row_indices, col_indices]
+
+                        # Compute probabilities for ground truth and chosen answers
+                        # Extract the logits for these positions
+                        row_logits = logits[row_indices, col_indices, :]  # (num_targets, vocab_size)
+                        row_probs = torch.softmax(row_logits, dim=-1)
+
+                        # Ground truth probabilities
+                        ground_truth_probs = []
+                        chosen_answer_probs = []
+                        grouped_best_moves = []
+                        grouped_predicted_tokens = []
                         grouped_ground_truth_probs = []
                         grouped_chosen_answer_probs = []
-                        grouped_predicted_tokens = []  # To store the grouped tokens actually chosen
 
+                        unique_rows = torch.unique(row_indices)
                         for row in unique_rows:
-                            # Indices corresponding to the current row
                             current_row_mask = (row_indices == row)
+                            
+                            row_best_moves = best_moves[current_row_mask]  # ground truth tokens for this row
+                            row_preds = predicted_tokens[current_row_mask] # predicted tokens for this row
 
-                            # Group logits and probabilities for the current row
-                            row_logits = logits[row_indices[current_row_mask], col_indices[current_row_mask], :]
-                            row_probs = torch.softmax(row_logits, dim=-1)
+                            # Extract row-specific probabilities
+                            row_start = torch.nonzero(current_row_mask).min()
+                            row_end = torch.nonzero(current_row_mask).max()
 
-                            # Group token probabilities
-                            # grouped_token_probs.append(row_probs.tolist())  # Convert to list
+                            # row_probs for this specific row
+                            # Instead of slicing by range, we can just index directly:
+                            # The positions in row_indices, col_indices corresponding to this row are directly mask-selected
+                            row_positions = torch.where(current_row_mask)[0]
+                            current_row_probs = row_probs[row_positions, :]
 
-                            # Ground truth probabilities for each best move in the current row
-                            row_best_moves = best_moves[current_row_mask]
-                            grouped_ground_truth_probs.append(row_probs[torch.arange(row_probs.size(0)), row_best_moves].tolist())  # Convert to list
+                            # Ground truth probabilities for each token
+                            gt_probs = current_row_probs[torch.arange(current_row_probs.size(0)), row_best_moves]
+                            chosen_probs = current_row_probs[torch.arange(current_row_probs.size(0)), row_preds]
 
-                            # Chosen answer probabilities for each predicted token in the current row
-                            row_predicted_tokens = predicted_tokens[current_row_mask]
-                            grouped_chosen_answer_probs.append(row_probs[torch.arange(row_probs.size(0)), row_predicted_tokens].tolist())  # Convert to list
+                            grouped_best_moves.append(row_best_moves.tolist())
+                            grouped_predicted_tokens.append(row_preds.tolist())
+                            grouped_ground_truth_probs.append(gt_probs.tolist())
+                            grouped_chosen_answer_probs.append(chosen_probs.tolist())
 
-                            # Group the tokens actually chosen (predicted tokens)
-                            grouped_predicted_tokens.append(row_predicted_tokens.tolist())  # Convert to list
+                        log_batch_info(
+                            iter_num=iter_num,
+                            loss=loss,
+                            predicted_tokens=grouped_predicted_tokens,
+                            best_moves=grouped_best_moves,
+                            ground_truth_probs=grouped_ground_truth_probs,
+                            chosen_answer_probs=grouped_chosen_answer_probs,
+                            config=config,
+                            tokenizer=tokenizer,
+                            logger=logger,
+                            attended_tokens=attended_tokens,
+                            attn_mask=attn_mask,
+                            seq=seq_tmp[0]  # seq_tmp is the input to the model (prompt+pad), for logging
+                        )
+                        # # recalculate everything wiht 
+                        # seq_tmp = seq.detach().clone()
+                        # token_indices = torch.nonzero(loss_mask) # find false values in loss mask (target tokens for prediction)
+                        # seq_tmp[loss_mask == 1]=0
+                        
+                        # outputs = model(**{"input_ids": seq_tmp, "attention_mask": attn_mask, "output_attentions": True}) # I think this will output gibberish now becaus I haven't trained the model to understand my new tokens yet.
+                        # logits = outputs.logits  # Shape: (batch_size, seq_len, vocab_size). torch.argmax(logits, dim=-1) gets the token it thinks is most likely to follow the initial i tokens. 
 
-                        log_batch_info(iter_num=iter_num, 
-                                    loss=loss, 
-                                    predicted_tokens=grouped_predicted_tokens, 
-                                    best_moves=grouped_best_moves, 
-                                    ground_truth_probs=grouped_ground_truth_probs,
-                                    chosen_answer_probs=grouped_chosen_answer_probs,
-                                    config=config,
-                                    tokenizer=tokenizer,
-                                    logger=logger,
-                                    attended_tokens=attended_tokens,
-                                    attn_mask = attn_mask,
-                                    seq = seq[0])
+                        # # Compute loss
+                        # # Let's assume `labels` is a tensor of the same shape as `seq`, where the target tokens are stored.
+                        # loss_fn = torch.nn.CrossEntropyLoss(reduction='none')  # Use 'none' to apply loss mask
+                        # loss = loss_fn(logits.view(-1, logits.size(-1)), seq.view(-1))  # Shape: (batch_size * seq_len)
+
+                        # # Apply the loss mask
+                        # loss = loss.view(seq.size(0), seq.size(1))  # Reshape to (batch_size, seq_len)
+                        # loss = loss * loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
+                        # loss = loss.sum() / (loss_mask).sum()  # Normalize over unmasked tokens
+                        # loss = loss / gradient_accumulation_steps  # Normalize loss for accumulated gradients
+                        # attention_weights = outputs.attentions  # List of attention tensors
+                        # attended_tokens = torch.argmax(attention_weights[0][0, 0], dim=-1)  
+                        # # back out best move from each sample
+                        # token_indices = torch.nonzero(loss_mask) # find false values in loss mask (target tokens for prediction)
+                        # row_indices = token_indices[:,0]
+                        # col_indices = token_indices[:,1]
+                        # best_moves = seq[row_indices, col_indices] # gives us all best moves (loss_mask[row_indices, col_indices]=all false values)
+                        # grouped_best_moves = []
+                        # unique_rows = torch.unique(row_indices)
+                        # for row in unique_rows:
+                        #     grouped_best_moves.append(best_moves[row_indices==row].tolist())
+                        
+                        # ## to back predicted tokens out
+                        # predicted_tokens = torch.argmax(logits, dim=-1) # get predicted tokens
+                        # predicted_tokens = predicted_tokens[row_indices, col_indices]
+                        
+                                        
+                        # # Group token probabilities by row
+
+                        # # grouped_token_probs = []
+                        # grouped_ground_truth_probs = []
+                        # grouped_chosen_answer_probs = []
+                        # grouped_predicted_tokens = []  # To store the grouped tokens actually chosen
+
+                        # for row in unique_rows:
+                        #     # Indices corresponding to the current row
+                        #     current_row_mask = (row_indices == row)
+
+                        #     # Group logits and probabilities for the current row
+                        #     row_logits = logits[row_indices[current_row_mask], col_indices[current_row_mask], :]
+                        #     row_probs = torch.softmax(row_logits, dim=-1)
+
+                        #     # Group token probabilities
+                        #     # grouped_token_probs.append(row_probs.tolist())  # Convert to list
+
+                        #     # Ground truth probabilities for each best move in the current row
+                        #     row_best_moves = best_moves[current_row_mask]
+                        #     grouped_ground_truth_probs.append(row_probs[torch.arange(row_probs.size(0)), row_best_moves].tolist())  # Convert to list
+
+                        #     # Chosen answer probabilities for each predicted token in the current row
+                        #     row_predicted_tokens = predicted_tokens[current_row_mask]
+                        #     grouped_chosen_answer_probs.append(row_probs[torch.arange(row_probs.size(0)), row_predicted_tokens].tolist())  # Convert to list
+
+                        #     # Group the tokens actually chosen (predicted tokens)
+                        #     grouped_predicted_tokens.append(row_predicted_tokens.tolist())  # Convert to list
+                            
+                        # log_batch_info(iter_num=iter_num, 
+                        #             loss=loss, 
+                        #             predicted_tokens=grouped_predicted_tokens, 
+                        #             best_moves=grouped_best_moves, 
+                        #             ground_truth_probs=grouped_ground_truth_probs,
+                        #             chosen_answer_probs=grouped_chosen_answer_probs,
+                        #             config=config,
+                        #             tokenizer=tokenizer,
+                        #             logger=logger,
+                        #             attended_tokens=attended_tokens,
+                        #             attn_mask = attn_mask,
+                        #             seq = seq_tmp[0])
                     # Convert grouped lists to tensors if needed
                     # For example: grouped_token_probs = [torch.stack(group) for group in grouped_token_probs]
 
@@ -565,7 +665,8 @@ def training(config: dict) -> None:
     # destroy subprocess at end
     if ddp:
         destroy_process_group()
-    
+        
+        
 def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_probs, chosen_answer_probs, config, tokenizer, logger, attended_tokens, attn_mask, seq):
     # Helper function for conditional formatting of probabilities
     def format_prob(prob):
@@ -573,20 +674,22 @@ def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_pr
     
     # Compute average probabilities for each move, avoiding division by 0
     def compute_average_prob(probs, num_tokens):
-        return probs.sum() / max(num_tokens, 1)  # Avoid division by 0
+        probs_tensor = torch.tensor(probs)
+        return probs_tensor.sum() / max(num_tokens, 1)  # Avoid division by 0
 
     # Compute accuracy as the percentage of moves where all tokens match
     batch_size = len(best_moves)
     accuracy = sum(
-        torch.equal(torch.tensor(predicted_tokens[i]), torch.tensor(best_moves[i])) for i in range(batch_size)
+        torch.equal(torch.tensor(predicted_tokens[i]), torch.tensor(best_moves[i])) 
+        for i in range(batch_size)
     ) / batch_size * 100  # Accuracy in percentage
 
     avg_best_move_probs = [
-        compute_average_prob(torch.tensor(ground_truth_probs[i]), len(best_moves[i]))
+        compute_average_prob(ground_truth_probs[i], len(best_moves[i]))
         for i in range(batch_size)
     ]
     avg_chosen_move_probs = [
-        compute_average_prob(torch.tensor(chosen_answer_probs[i]), len(predicted_tokens[i]))
+        compute_average_prob(chosen_answer_probs[i], len(predicted_tokens[i]))
         for i in range(batch_size)
     ]
 
@@ -601,19 +704,26 @@ def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_pr
     logger.info(f"Attended tokens for sample 0: {attended_tokens}")
     logger.info(f"Attention mask for sample 0: {attn_mask[0]}")
     token_indices = torch.nonzero(attn_mask[0])
-    logger.info(f"Seq is {seq[token_indices].squeeze(1)}")
+    logger.info(f"Seq is {seq}")
+    # logger.info(f"Seq is {seq[token_indices].squeeze(1)}")
+
     # Header for the table columns
     logger.info(f"{'Best Move':<20}{'Chosen Move':<20}{'Best Move Prob':<20}{'Chosen Move Prob':<20}")
 
     # Table rows for each sample in the batch
     for i in range(batch_size):
-        best_move = tokenizer.decode(best_moves[i])  # Decode all tokens of the best move
-        chosen_move = tokenizer.decode(predicted_tokens[i])  # Decode all tokens of the chosen move
+        best_move_tokens = best_moves[i]
+        predicted_move_tokens = predicted_tokens[i]
+        
+        best_move_str = tokenizer.decode(best_move_tokens)
+        chosen_move_str = tokenizer.decode(predicted_move_tokens)
         best_move_prob = avg_best_move_probs[i]  # Average probability for the best move
         chosen_move_prob = avg_chosen_move_probs[i]  # Average probability for the chosen move
+        
         logger.info(
-            f"{best_move:<20}{chosen_move:<20}{format_prob(best_move_prob):<20}{format_prob(chosen_move_prob):<20}"
+            f"{best_move_str:<20}{chosen_move_str:<20}{format_prob(best_move_prob):<20}{format_prob(chosen_move_prob):<20}"
         )
+
 
 def sweep_hyperparameters(config: dict, sweep_runs: int = 10) -> None:
     """

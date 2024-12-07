@@ -93,9 +93,9 @@ class PythiaPlayer:
         
     def get_response(self, board: chess.Board, temperature: float) -> str:
         legal_moves = [str(m) for m in board.legal_moves]
-        info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=len(legal_moves))
-        best_move = info[0]['pv'][0].uci()
-        move_tokens = np.array(self._tokenizer(best_move, add_special_tokens=False)['input_ids'], dtype=np.int32)
+        # info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=len(legal_moves))
+        # best_move = info[0]['pv'][0].uci()
+        # move_tokens = np.array(self._tokenizer(best_move, add_special_tokens=False)['input_ids'], dtype=np.int32)
         
         fen = board.fen()
         fen_tokens = np.array(self._tokenizer(fen, add_special_tokens=False)['input_ids'], dtype=np.int32)
@@ -108,36 +108,33 @@ class PythiaPlayer:
                 fen_tokens,
                 self._pretokenized_prompt[1],
                 legal_move_tokens,
-                self._pretokenized_prompt[2],
-                np.zeros_like(move_tokens)
+                self._pretokenized_prompt[2]
             ]
         )
-        predefined_array = np.copy(self._predefined_array)
-        tokens_to_copy = min(len(prompt_tokens), len(predefined_array))
-        predefined_array[:tokens_to_copy] = prompt_tokens[:tokens_to_copy]
-        predefined_attn_mask = np.copy(self._attn_mask)
-        predefined_attn_mask[:tokens_to_copy] = False
         
-        # generate best move
-        predefined_array = torch.tensor(predefined_array).unsqueeze(0)
-        predefined_attn_mask = torch.tensor(predefined_attn_mask).unsqueeze(0)
-        generated_outputs = self.model.generate(
-            input_ids=predefined_array,
-            attention_mask=predefined_attn_mask,
-            max_length=predefined_array.size(1)+5,  # Ensure the generated sequence matches the input length
-        )
-        print(self._tokenizer.batch_decode(generated_outputs))
-        response = generated_outputs[tokens_to_copy: tokens_to_copy+4]
-        
-        top_k = 200  # retain only the top_k most likely tokens, clamp others to have 0 probability
-        start_ids = self.encode(fen)
+        # Now convert to torch tensors
+        input_ids = torch.tensor(prompt_tokens, dtype=torch.long).unsqueeze(0).to(self.model.device)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
 
-        x = torch.tensor(start_ids, dtype=torch.long, device=self.device)[None, ...]
-        with torch.no_grad():
-            y = self.model.generate(x, 1, temperature=temperature, top_k=top_k)
-            model_response = self.decode(y[0][-1].tolist()) # this would give you 'e2e4' for example. 
-            # but I'm not sure the generate function is really working correctly, because it seems like it can only really generate 1 sample. so I think I'm not sampling from the probability distribution correclt.y
-        return model_response
+        # Now use model.generate() to produce the next tokens
+        # Let's say we want to generate up to 4 tokens for the best move
+        generated_outputs = self.model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=4,  # This will produce up to 4 new tokens after the prompt
+            temperature=temperature,
+            do_sample=True,       # or False if you want greedy
+            top_k=50,             # optional, depends on your decoding strategy
+            top_p=0.95            # optional, depends on your decoding strategy
+        )
+                # The generated output includes the original prompt plus the new tokens
+        all_tokens = generated_outputs[0].cpu().numpy()
+
+        # The new tokens are the last 4 tokens in `all_tokens[len(prompt_tokens):]`
+        best_move_ids = all_tokens[len(prompt_tokens):]  
+        best_move = self._tokenizer.decode(best_move_ids)
+                
+        return best_move
     
     
 class NanoGptPlayer:

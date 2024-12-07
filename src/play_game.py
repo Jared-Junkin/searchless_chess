@@ -627,8 +627,8 @@ recording_file = "logs/determine.csv"  # default recording file. Because we are 
 # player_ones = ['ckpt12000.pt']# player_ones = ["ckpt600000.pt"]
 player_ones = ['ckpt' + str(600000) + ".pt"]
 # player_two_recording_name = "stockfish"
-tokenizer_config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt40000"
-config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt40000"
+tokenizer_config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt500"
+config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt500"
 CODEX = InferenceTimeBehavioralCloning()
 if __name__ == "__main__":
     
