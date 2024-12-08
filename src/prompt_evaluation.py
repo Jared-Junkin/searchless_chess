@@ -70,7 +70,7 @@ PROMPTS = {
 }
 
 @torch.no_grad()
-def prompt_evaluation(model: AutoModelForCausalLM, data_iter: LlamaLoader, num_batches: int=2) -> None:
+def prompt_evaluation(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, data_iter: LlamaLoader, num_batches: int=2) -> None:
     # calculate exhaustive list of all valid san moves
     file_path = "prompt_statistics.txt"
     all_moves = utils._compute_all_possible_actions()
@@ -101,7 +101,7 @@ def prompt_evaluation(model: AutoModelForCausalLM, data_iter: LlamaLoader, num_b
             try:
                 seq, attn_mask, loss_mask, fen_batch, best_move_batch = next(data_iter)
             except StopIteration:
-                print(f"Out of")
+                print(f"Out of data")
                 batch_statistics["Best_Move"]/=batch_statistics["num_moves"]
                 batch_statistics["Valid_San"]/=batch_statistics["num_moves"]
                 batch_statistics["First_move"]/=batch_statistics["num_moves"]
@@ -113,42 +113,23 @@ def prompt_evaluation(model: AutoModelForCausalLM, data_iter: LlamaLoader, num_b
                 f.close()
                 helper.close()
                 return
-            generated_outputs = model.generate(
-                input_ids=seq,
-                attention_mask=attn_mask,
-                max_length=seq.size(1)+5,  # Ensure the generated sequence matches the input length
-                pad_token_id=model.config.pad_token_id,
-                eos_token_id=model.config.eos_token_id
-            )
 
-            # Convert generated outputs to predicted tokens
-            generated_tokens = generated_outputs  # Shape: (batch_size, seq_len)
+            # seq[attn_mask==0] = 0 # remove target tokens ahead of generation
+            # best_move = generate_best_move_hook(input_ids=seq, model=model, tokenizer=tokenizer)
 
-            # Identify indices where loss_mask is False
-            token_indices = torch.nonzero(~loss_mask)  # Shape: (num_false, 2)
-            row_indices = token_indices[:, 0]  # Batch index
-            col_indices = token_indices[:, 1]  # Token position index
-
-            # Extract predictions for tokens where loss_mask is False
-            filtered_tokens = generated_tokens[row_indices, col_indices]
-
-            # Group predictions by batch row
-            unique_rows = torch.unique(row_indices)
-            grouped_filtered_tokens = []  # To store the grouped tokens for each batch element
-            for row in unique_rows:
-                current_row_mask = (row_indices == row)
-                row_filtered_tokens = filtered_tokens[current_row_mask]
-                grouped_filtered_tokens.append(row_filtered_tokens.tolist())  # Convert to list
-       
             i=0
             for fen, best_move in zip(fen_batch, best_move_batch):
-                prediction = data_iter.getTokenizer().decode(grouped_filtered_tokens[i])
-                
-                
                 board.set_fen(fen)
                                 
                 # get legal moves for AI prompt
+                # seq, attn_mask, loss_mask, fen_batch, best_move_batch = next(data_iter)
                 legal_moves = [str(m) for m in board.legal_moves]
+                
+
+                seq[i][attn_mask[i]==0] = 0 # remove target tokens ahead of generation
+                sample = seq[i][seq[i]!=0]
+                prediction = generate_best_move_hook(input_ids=sample.unsqueeze(0), model=model, tokenizer=tokenizer)
+                
                 
                 # get best moves so we can evaluate how good our agent is
                 # Get best moves so we can evaluate how good our agent is
@@ -198,7 +179,7 @@ def prompt_evaluation(model: AutoModelForCausalLM, data_iter: LlamaLoader, num_b
                 if legal_moves[0] == best_move:
                     batch_statistics["Best_move_is_first_move"]+=1
                 i+=1
-                print(f"done sample {i}")
+                print(f"done sample {i}. Player's move is {candidates[0]}.  best move is {best_move}")
 
             print("done batch")
         batch_statistics["Best_Move"]/=batch_statistics["num_moves"]
@@ -239,7 +220,7 @@ if __name__ == "__main__":
         config["ddp_local_rank"] = 0
         config["ddp_rank"] = 0
 
-    config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt40000"
+    config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt52000"
     model = AutoModelForCausalLM.from_pretrained(config_path)
     tokenizer = AutoTokenizer.from_pretrained(config_path)
     data_iter = LlamaLoader(config=config, tokenizer=tokenizer, split="test", repeat=False)
@@ -248,6 +229,6 @@ if __name__ == "__main__":
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}['bfloat16']
     ctx = nullcontext() if config['device_type'] == 'cpu' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
     with ctx if ctx else torch.no_grad():  # Use ctx if provided, else default no_grad context
-        prompt_evaluation(model, data_iter, num_batches=200)
+        prompt_evaluation(model, tokenizer, data_iter, num_batches=10)
     if ddp:
         destroy_process_group()

@@ -11,7 +11,7 @@ import random
 # NOTE: LLAMA AND NANOGPT ARE EXPERIMENTAL PLAYERS that most people won't need to use
 # They are commented by default to avoid unnecessary dependencies such as pytorch.
 # from llama_module import BaseLlamaPlayer, LocalLlamaPlayer, LocalLoraLlamaPlayer
-from jared_models.pythiaPlayer  import PythiaPlayer
+from pythiaPlayer import PythiaPlayer
 # import gpt_query
 
 from typing import Optional, Tuple
@@ -210,7 +210,7 @@ def record_results(
 
     if RUN_FOR_ANALYSIS:
         csv_file_path = (
-            f"logs/{player_one_recording_name}_vs_{player_two_recording_name}"
+            f"pythia/logs/{player_one_recording_name}_vs_{player_two_recording_name}"
         )
         csv_file_path = csv_file_path.replace(
             ".", "_"
@@ -221,7 +221,11 @@ def record_results(
 
     # Determine if we need to write headers (in case the file doesn't exist yet)
     write_headers = not os.path.exists(csv_file_path)
-
+    # Check if the file exists and create it with headers if not
+    if not os.path.exists(csv_file_path):
+        with open(csv_file_path, "w", newline="") as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=info_dict.keys())
+            writer.writeheader()
     # Append the results to the CSV file
     with open(csv_file_path, "a", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=info_dict.keys())

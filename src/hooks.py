@@ -2,7 +2,7 @@
 from typing import List, Dict, Any, Tuple, Callable
 from abc import ABC, abstractmethod
 import torch
-from transformers import PreTrainedTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 # abstract hook class
 import numpy as np
@@ -20,27 +20,33 @@ class HookManager:
             self.hooks[name](*args, **kwargs)
 
 
-def generate_best_move_hook(fen_tokens: np.ndarray, 
-                            legal_move_tokens, 
-                            prompt_components: List[np.ndarray], 
-                            model: AutoModelForCausalLM, 
-                            tokenizer: PreTrainedTokenizer,
-                            temperature: float = 1.0
+def generate_best_move_hook(model: AutoModelForCausalLM, 
+                            tokenizer: AutoTokenizer,
+                            temperature: float = 1.0,
+                            input_ids: torch.Tensor = None,
+                            fen_tokens: np.ndarray = None, 
+                            legal_move_tokens = None, 
+                            prompt_components: List[np.ndarray] = None, 
                             )->None:
-    
-        prompt_tokens = np.concatenate(
-                [
-                    prompt_components[0],
-                    fen_tokens,
-                    prompt_components[1],
-                    legal_move_tokens,
-                    prompt_components[2]
-                ]
-            )
+        if input_ids is None: # in this case, we have to construct the prompt
+            assert prompt_components and fen_tokens and legal_move_tokens
+        
+            prompt_tokens = np.concatenate(
+                    [
+                        prompt_components[0],
+                        fen_tokens,
+                        prompt_components[1],
+                        legal_move_tokens,
+                        prompt_components[2]
+                    ]
+                )
+                
+            # Now convert to torch tensors
+            input_ids = torch.tensor(prompt_tokens, dtype=torch.long).unsqueeze(0).to(model.device)
             
-        # Now convert to torch tensors
-        input_ids = torch.tensor(prompt_tokens, dtype=torch.long).unsqueeze(0).to(model.device)
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+            
+        attention_mask = torch.zeros_like(input_ids, dtype=torch.long) 
+        attention_mask[input_ids!=0] = 1 # prevent model from attending to padding tokens
 
         # Now use model.generate() to produce the next tokens
         # Let's say we want to generate up to 4 tokens for the best move
@@ -57,7 +63,7 @@ def generate_best_move_hook(fen_tokens: np.ndarray,
         all_tokens = generated_outputs[0].cpu().numpy()
 
         # The new tokens are the last 4 tokens in `all_tokens[len(prompt_tokens):]`
-        best_move_ids = all_tokens[len(prompt_tokens):]  
+        best_move_ids = all_tokens[input_ids.shape[-1]:]  
         best_move = tokenizer.decode(best_move_ids)
                 
         return best_move
@@ -103,7 +109,7 @@ def log_batch_details_hook(outputs: torch.Tensor,
                            iter_num: int,
                            loss: torch.Tensor,
                            config: dict,
-                           tokenizer: PreTrainedTokenizer,
+                           tokenizer: AutoTokenizer,
                            logger: logging.Logger,
                            attn_mask: torch.Tensor,
                            seq_tmp: torch.Tensor,
@@ -255,7 +261,7 @@ def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_pr
 #         master_process (bool): A flag indicating whether the current process is the master process (useful in distributed setups).
 #         log_interval (int): The frequency (in iterations) at which to log batch results.
 #         logger (logging.Logger): The logger instance used for logging batch results.
-#         tokenizer (PreTrainedTokenizer): The tokenizer used to decode token indices into human-readable text.
+#         tokenizer (AutoTokenizer): The tokenizer used to decode token indices into human-readable text.
 
 #     Purpose:
 #         This hook is used to log the current batch's training information, including:
@@ -285,7 +291,7 @@ def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_pr
 #         master_process: bool,
 #         log_interval: int,
 #         logger: logging.Logger,
-#         tokenizer: PreTrainedTokenizer
+#         tokenizer: AutoTokenizer
 #     )->None:
 #         print(f"Successfully entered hook")
 #         if iter_num % log_interval == 0 and master_process:

@@ -16,6 +16,7 @@ import numpy as np
 import pickle
 from typing import List
 import chess
+import hooks
 import chess.engine
 
 STOCKFISH_PATH = "/usr/games/stockfish"
@@ -43,6 +44,7 @@ class PythiaPlayer:
             raise ValueError(f"Expected prompt_components to have a length of 3, but got len {len(prompt_components)}.")
         
         self.model = AutoModelForCausalLM.from_pretrained(model_config_path)
+        self.model_name = model_config_path
         self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_config_path)
         self.helper = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
         self.draws_okay = draws_okay
@@ -65,6 +67,8 @@ class PythiaPlayer:
             fill_value=True,
             dtype=bool,
         )
+    def get_config(self) -> dict:
+        return {"model": self.model_name}
     # get a move from the agent and return it in the proper format
     def get_move(self, board: chess.Board, game_state: str, temperature: float) -> str:
         if self.draws_okay:
@@ -92,10 +96,8 @@ class PythiaPlayer:
             return completion # just removing this because rightnow my decoder can only handle the most likely move.
         
     def get_response(self, board: chess.Board, temperature: float) -> str:
+        
         legal_moves = [str(m) for m in board.legal_moves]
-        # info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=len(legal_moves))
-        # best_move = info[0]['pv'][0].uci()
-        # move_tokens = np.array(self._tokenizer(best_move, add_special_tokens=False)['input_ids'], dtype=np.int32)
         
         fen = board.fen()
         fen_tokens = np.array(self._tokenizer(fen, add_special_tokens=False)['input_ids'], dtype=np.int32)
@@ -114,25 +116,9 @@ class PythiaPlayer:
         
         # Now convert to torch tensors
         input_ids = torch.tensor(prompt_tokens, dtype=torch.long).unsqueeze(0).to(self.model.device)
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+        # get best move
+        best_move = hooks.generate_best_move_hook(input_ids=input_ids, model=self.model, tokenizer=self._tokenizer, temperature=temperature)
 
-        # Now use model.generate() to produce the next tokens
-        # Let's say we want to generate up to 4 tokens for the best move
-        generated_outputs = self.model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=4,  # This will produce up to 4 new tokens after the prompt
-            temperature=temperature,
-            do_sample=True,       # or False if you want greedy
-            top_k=50,             # optional, depends on your decoding strategy
-            top_p=0.95            # optional, depends on your decoding strategy
-        )
-                # The generated output includes the original prompt plus the new tokens
-        all_tokens = generated_outputs[0].cpu().numpy()
-
-        # The new tokens are the last 4 tokens in `all_tokens[len(prompt_tokens):]`
-        best_move_ids = all_tokens[len(prompt_tokens):]  
-        best_move = self._tokenizer.decode(best_move_ids)
                 
         return best_move
     
