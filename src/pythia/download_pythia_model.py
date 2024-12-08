@@ -4,7 +4,7 @@ import shutil
 
 # Specify the model repository and the destination directory
 repo_id = "EleutherAI/pythia-160m"
-output_dir = "pythia-160"
+output_dir = "pythia-160m"
 
 # Download the model files from the Hugging Face Hub
 print("Downloading Pythia 160M...")

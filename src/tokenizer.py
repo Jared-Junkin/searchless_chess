@@ -53,6 +53,8 @@ _CHARACTERS = [
     'w',
     '.',
 ]
+# note: some of these are 5 characters long because that is how you represent a pawn promoting to a queen/rook/knight/bishop in UCI. 
+# also: castling is represented only by the movement of the king. The rook's movement is automatically calculated by the UCI Engine.
 # pyfmt: enable
 _CHARACTERS_INDEX = {letter: index for index, letter in enumerate(_CHARACTERS)}
 _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
