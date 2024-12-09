@@ -80,7 +80,8 @@ def forward_step_hook(seq: torch.Tensor,
         seq_tmp = seq.detach().clone()
         seq_tmp[loss_mask == 1] = 0  # Replace target tokens in the input with pad (0)
     elif method == "attend_to_prev_ansewrs":
-        seq_tmp = seq
+        seq_tmp = seq # 
+        attn_mask = (seq_tmp > 0).long().to(seq.device) # if we're attending to previous answers, we should modify attention mask to do so. (really all this should be done in the dataloader, but I'm short on time.)
     else:
         raise NotImplementedError(f"Method {method} is not a valid input. See hooks.py ~ forward_step_hook for details.")
 
