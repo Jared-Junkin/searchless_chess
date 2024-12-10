@@ -397,7 +397,7 @@ def training(config: dict) -> None:
             if ddp:
                 model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
             with ctx:
-                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp = forward_step_hook(seq=seq,
+                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask = forward_step_hook(seq=seq,
                                                                                loss_mask=loss_mask,
                                                                                attn_mask=attn_mask,
                                                                                model=model,

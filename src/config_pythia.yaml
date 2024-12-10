@@ -15,7 +15,7 @@ log_interval: 10
 eval_iters: 0
 eval_only: False                          # if True, script exits right after the first eval
 always_save_checkpoint: True               # if True, always save a checkpoint after each eval
-log_path: "/workspace/searchless_chess/src/pythia/logs/train_13.log"
+log_path: "/workspace/searchless_chess/src/pythia/logs/train_15.log"
 
 # wandb logging
 wandb_log: False                           # disabled by default. Don't want to make an account
@@ -47,4 +47,4 @@ device_type: 'cuda'
 device: 'cuda'                             # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype: 'bfloat16'                          # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile: True                              # use PyTorch 2.0 to compile the model to be faster (jared is temporarily setting to false for debugging purposes.)
-description: "Padding replaces endoftext. legal moves in prompt. halfmoves, fullmoves, numbres indicating empty spaces are all replaced by periods, as well as - indicating no en passant or castling rights. not using attention mask (using built-in). I am shifting logits by 1 when calculating loss to avoid teacher forcing leading to trivial output."
+description: "Same as previous run but I made sure I'm not attending to padding tokens now. "

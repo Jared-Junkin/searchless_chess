@@ -76,7 +76,7 @@ class BagDataset(Dataset):
         
         
         # calculate buffer size
-        self._SEQUENCE_LENGTH=77 + (6*50) + sum([len(prompt) for prompt in self._pretokenized_prompt]) # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
+        self._SEQUENCE_LENGTH=77 + (10*45) + sum([len(prompt) for prompt in self._pretokenized_prompt]) # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
         
         
         # self._SEQUENCE_LENGTH=77+5+sum([len(prompt) for prompt in self._pretokenized_prompt])
@@ -97,7 +97,7 @@ class BagDataset(Dataset):
         
         self._attn_mask: np.ndarray = np.full(
             shape=(self._SEQUENCE_LENGTH,),
-            fill_value=True,
+            fill_value=False,
             dtype=bool
         )
         
@@ -105,17 +105,27 @@ class BagDataset(Dataset):
         self._last_best_move = None
         all_moves = utils._compute_all_possible_actions()
         all_moves = list(all_moves[0].keys())
-        self.all_move_encodings = {}
+        original_mappings = {}
         for move in all_moves:
             encoding = []
             for char in move: 
                 encoding.append(self.encodings[char])
-            self.all_move_encodings[move] = encoding
+            original_mappings[move] = encoding
+            
+        self._tokenizer.add_special_tokens({"additional_special_tokens": all_moves})                                      # adding new tokens for each move
+                                                                              # storing tokenizer
+        final_mappings = {move: tokenizer.convert_tokens_to_ids(move) for move in all_moves}                        # embedding of 'g1h2 after special tokens added: 'g1h2': [128413]
         
-
+        self.all_move_encodings = {move: original_mappings[move] + 
+                               self._tokenizer(": ", add_special_tokens=False)["input_ids"] + 
+                               [final_mappings[move]] + 
+                               self._tokenizer(", ", add_special_tokens=False)["input_ids"] for move in all_moves}  # 'g1h2': [70, 16, 71, 17] + tokenizer(": ") + [128413] + ", "
+        
+        self._tokenizer.save_pretrained(tokenizer_save_path)
 
         
     def _tokenize(self, fen: str, move: SyntaxError)->Tuple[np.ndarray, np.ndarray]:
+        
 
         
         spaces_characters = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
@@ -165,20 +175,17 @@ class BagDataset(Dataset):
         fullmoves += '.' * (3 - len(fullmoves))
         indices.extend([self.encodings[x] for x in fullmoves])
         
-        # encode best move. Encoding explicitly on a letter-by-letter basis.
-        best_move=list()
-        for char in move:
-            best_move.append(self.encodings[char])
-            # set up loss mask 
+        # encode best move. Encoding as a single token.
+        best_move = self._tokenizer.encode(move)
 
         
         # add in legal moves to prompt.
         self._board.set_fen(fen=fen)
         legal_tokens = []
         legal_moves = [str(m) for m in self._board.legal_moves]
-        for move in legal_moves:
-            legal_tokens.extend(self.all_move_encodings[move])
-            legal_tokens.extend(self.comma_space) # add ", " to help the LLM with readability.
+        for legal_move in legal_moves:
+            legal_tokens.extend(self.all_move_encodings[legal_move])
+            # legal_tokens.extend(self.comma_space) # add ", " to help the LLM with readability.
             
         # assemble our final prompt
         prompt_tokens = np.concatenate([
@@ -202,7 +209,8 @@ class BagDataset(Dataset):
         
         # make sure loss mask aligns with tokens we want to predict
         loss_mask[tokens_to_copy-len(best_move):tokens_to_copy] = True # calculate loss on only location of token we want to predict
-        
+        # mask out padding tokens from attending to anything
+        attn_mask[:tokens_to_copy-1] = True
 
         assert len(predefined_array) == self._SEQUENCE_LENGTH
 
