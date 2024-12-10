@@ -15,12 +15,13 @@ import time
 import logging
 from typing import Tuple, Callable, Any
 import os
+from hooks import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false" # disabling Autotokenizer parallelism so we can do distributed training.
 # os.environ["WANDB_MODE"] = "offline" # disabling wandb attempting to sync with my account, which doesn't exist.
 from yaml import CLoader as Loader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import traceback
-        
+from hooks import HookManager, forward_step_hook, log_batch_details_hook
 
 ### Jared Imports
 from typing import Optional
@@ -115,7 +116,7 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
 
                 # Apply the loss mask
                 loss = loss.view(seq.size(0), seq.size(1))  # Reshape to (batch_size, seq_len)
-                loss = loss * ~loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
+                loss = loss * loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
                 loss = loss.sum() / (~loss_mask).sum()  # Normalize over unmasked tokens
             losses[k] = loss.item()
 
@@ -284,6 +285,25 @@ def training(config: dict) -> None:
     model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
     tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"])
     
+    
+    
+    # hook_manager = HookManager()
+    # loghook = LogBatchHook()
+    # hook_manager.register_hook(loghook, context = {iter_num: int,
+    #                                                 seq: torch.Tensor,
+    #                                                 loss: torch.Tensor,
+    #                                                 loss_mask: torch.Tensor,
+    #                                                 logits: torch.Tensor,
+    #                                                 ctx,
+    #                                                 master_process: bool,
+    #                                                 log_interval: int,
+    #                                                 logger: logging.Logger,
+    #                                                 tokenizer: PreTrainedTokenizer
+    #                                                 }
+    #                             )
+
+    
+    
     # decrease context length of model.
     # current_positional_embeddings = model.model.get_input_embeddings().weight
     # new_positinal_embeddings = current_positional_embeddings[:config["max_context_length"]].clone()
@@ -347,7 +367,7 @@ def training(config: dict) -> None:
            
             
             if logger:
-                logger.info(f"iter: {iter_num}, train/loss: {train_loss}, val/loss: {val_loss}, lr: {lr}, mfu: {running_mfu * 100}, master_process: {master_process}")
+                logger.info(f"iter: {iter_num}, train/loss: {train_loss}, val/loss: {val_loss}, lr: {lr}, mfu: {running_mfu * 100}, master_process: {master_process}, seq: {seq.shape}, loss_mask: {loss_mask.shape}, attn_mask: {attn_mask.shape}")
         
             # Checkpoint saving
             if val_loss < best_val_loss or always_save_checkpoint:
@@ -377,79 +397,31 @@ def training(config: dict) -> None:
             if ddp:
                 model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
             with ctx:
-                # Pass input through the model
-                outputs = model(**{"input_ids": seq, "attention_mask": attn_mask}) # I think this will output gibberish now becaus I haven't trained the model to understand my new tokens yet.
-                logits = outputs.logits  # Shape: (batch_size, seq_len, vocab_size). torch.argmax(logits, dim=-1) gets the token it thinks is most likely to follow the initial i tokens. 
+                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp = forward_step_hook(seq=seq,
+                                                                               loss_mask=loss_mask,
+                                                                               attn_mask=attn_mask,
+                                                                               model=model,
+                                                                               gradient_accumulation_steps=gradient_accumulation_steps,
+                                                                               method=config["attn_method"])
 
-                # Compute loss
-                # Let's assume `labels` is a tensor of the same shape as `seq`, where the target tokens are stored.
-                loss_fn = torch.nn.CrossEntropyLoss(reduction='none')  # Use 'none' to apply loss mask
-                loss = loss_fn(logits.view(-1, logits.size(-1)), seq.view(-1))  # Shape: (batch_size * seq_len)
+                if iter_num % eval_interval == 0 and master_process:
+                    with torch.no_grad():
+                        # log_batch_details_hook
+                        log_batch_details_hook(
+                            outputs=outputs,
+                            shifted_mask=shifted_mask,
+                            shifted_labels=shifted_labels,
+                            logits=logits,
+                            iter_num=iter_num,
+                            loss=loss,
+                            config=config,
+                            tokenizer=tokenizer,
+                            logger=logger,
+                            attn_mask=attn_mask,
+                            seq_tmp=seq_tmp
+                        )
+                       
 
-                # Apply the loss mask
-                loss = loss.view(seq.size(0), seq.size(1))  # Reshape to (batch_size, seq_len)
-                loss = loss * ~loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
-                loss = loss.sum() / (~loss_mask).sum()  # Normalize over unmasked tokens
-                loss = loss / gradient_accumulation_steps  # Normalize loss for accumulated gradients
-                
-                if iter_num % log_interval == 0 and master_process: # log a bunch of statistics
-                    
-                    # back out best move from each sample
-                    token_indices = torch.nonzero(~loss_mask) # find false values in loss mask (target tokens for prediction)
-                    row_indices = token_indices[:,0]
-                    col_indices = token_indices[:,1]
-                    best_moves = seq[row_indices, col_indices] # gives us all best moves (loss_mask[row_indices, col_indices]=all false values)
-                    
-                    ## to back predicted tokens out
-                    predicted_tokens = torch.argmax(logits, dim=-1) # get predicted tokens
-                    predicted_tokens = predicted_tokens[row_indices, col_indices]
-                    
-                    ## back out probabilities associated iwth best move, move chosen
-                    # ground_truth_logits = logits[row_indices, col_indices, best_moves] # get the logit associated with each best move (batch_size,)
-                    token_probs = torch.softmax(logits[row_indices, col_indices], dim=-1) # get the probability associated with each logit (batch_size, vocab_size)
-                    ground_truth_probs = token_probs[torch.arange(token_probs.size(0)), best_moves] # probabilities associated with each best move
-                    chosen_answer_probs = token_probs[torch.arange(token_probs.size(0)), predicted_tokens] # probabilities associated with each move chosen
-                    
-                                        
-                    
-                    # log_batch_info(
-                    #     iter_num=iter_num,
-                    #     loss=loss,
-                    #     predicted_tokens=predicted_tokens,
-                    #     best_moves=best_moves,
-                    #     ground_truth_probs=ground_truth_probs,
-                    #     chosen_answer_probs=chosen_answer_probs,
-                    #     config=config,
-                    #     tokenizer=tokenizer,
-                    #     logger=logger 
-                    # )
-                                                            
-                                        
-                
-                ##miscellaneous useful things
-                ## remember that false = logical 1
-                # tokenizer.decode(seq[0]) # gives the text prompt
-                # print((~loss_mask.int()).argmax(dim=1)) # gives the location of the value the model is to train on each time
-                # for the last token (the one we want to train on) 
-                    # attn_mask[0][token_index-1] = False, attn_mask[0][token_index] = True, attn_mask[0][token_index+1] = True (the model should attend to all tokens up to, but not including, target token)
-                    # loss_mask[0][token_index-1] = True, attn_mask[0][token_index] = False, attn_mask[0][token_index+1] = True (loss should only be calculated on target token)
-
-                ## to back predicted tokens out
-                    # predicted_tokens = torch.argmax(logits, dim=-1) # get predicted tokens
-                    # predicted_tokens[0] gets predicted tokens for 0th sequence
-                    # preds = tokenizer.decode(predicted_tokens[0]) # gets text of what the model thinks
-                    # preds[token_index] should be the prediction for the value that's getting backpropagated
-                    # at iter 0 it shoudl look something like this: = 2bot factor*2 is:  *2.- 0\n\n =\n(,.2{ = = = )2,,,'_,2(2*
-                    ## note that preds will be of different lengths and predicted_tokens[i] will always be of constant length because a snigle token doesn't map to a single character, and preds is a string.
-                    
-                ## to generate (inference time):
-                    # input_dict = {"input_ids": seq[0].unsqueeze(0), "attention_mask": attn_mask[0].unsqueeze(0)}
-                    # tokens_gen = model.generate(**input_dict, max_length=len(seq[0]) + 7)
-                    # tokenizer.decode(tokens_gen[0])
-                    ## at iter 0 it should look soemtihng like this:1.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nA&A-1,\n\n1)\n\n1.0%\n\n1.0%\n
-                    
-            # Get the next batch 
-            # immediately async prefetch next batch while model is doing the forward pass on the GPU
 
             seq, attn_mask, loss_mask,_,_ = next(train_iter)
             seq = seq.to(device)
@@ -492,32 +464,8 @@ def training(config: dict) -> None:
     # destroy subprocess at end
     if ddp:
         destroy_process_group()
-    
-def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_probs, chosen_answer_probs, config, tokenizer, logger):
-    # Helper function for conditional formatting of probabilities
-    def format_prob(prob):
-        return f"{prob:.4e}" if prob < 0.0001 else f"{prob:.4f}"
+        
 
-    # Header line with loss and percent best move chosen
-    logger.info(
-        f"Iter: {iter_num}, "
-        f"Loss = {loss:.4f}, "
-        f"Percent best move chosen: {sum(predicted_tokens == best_moves) / config['batch_size']:.2%}"
-        f"Mean best move prob: {torch.mean(ground_truth_probs)}"
-    )
-
-    # Header for the table columns
-    logger.info(f"{'Best Move':<20}{'Chosen Move':<20}{'Best Move Prob':<20}{'Chosen Move Prob':<20}")
-
-    # Table rows for each sample in the batch
-    for i in range(config['batch_size']):
-        best_move = tokenizer.decode(best_moves[i])
-        chosen_move = tokenizer.decode(predicted_tokens[i])
-        best_move_prob = ground_truth_probs[i].item()
-        chosen_move_prob = chosen_answer_probs[i].item()
-        logger.info(
-            f"{best_move:<20}{chosen_move:<20}{format_prob(best_move_prob):<20}{format_prob(chosen_move_prob):<20}"
-        )
 
 def sweep_hyperparameters(config: dict, sweep_runs: int = 10) -> None:
     """
@@ -578,4 +526,3 @@ if __name__ == "__main__":
     # local_dir = "./Llama/llama-3.2-1B"
     # model = AutoModelForCausalLM.from_pretrained(local_dir)
     # tokenizer = AutoTokenizer.from_pretrained(local_dir)
-

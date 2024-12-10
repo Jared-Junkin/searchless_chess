@@ -297,3 +297,15 @@ either express or implied. See the licenses for the specific language governing
 permissions and limitations under those licenses.
 
 This is not an official Google product.
+
+
+Jared's note: 
+Features here:
+
+I'm using original tokens (now new tokens added for moves). Moves are being encoded on the character level. word-level is almost certainly better so I'm going to try that next. I fixed the following issues:
+
+1. I am now properly shifting the logits by 1 when calculating the loss. formerly, I wasn't shifting, which meant I was training the model to trivially output the same tokens that were input to it
+2. I was encoding the endoftext token instead of the padding token. 
+3. I was not accounting for how the tokenizer might tokenize numbers. For example, "NB" tokenizes to 230079. It should follow a character level encoding: "N" "B" which tokenizs to 45, 37
+4. I was not removing the halfmoves numbers or move number (deepmind paper ignores those and replaces with '.' Now I am doing that as well.)
+5. Similarly, I was not changing spacing in tokenization process: 5 empty spaces in fen gets encoded as "5" Now I encode as "....." 

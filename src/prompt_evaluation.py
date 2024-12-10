@@ -224,7 +224,7 @@ if __name__ == "__main__":
         config["ddp_local_rank"] = 0
         config["ddp_rank"] = 0
 
-    config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt152000"
+    config_path = "/workspace/searchless_chess/src/pythia/ckpts/ckpt500"
     model = AutoModelForCausalLM.from_pretrained(config_path)
     tokenizer = AutoTokenizer.from_pretrained(config_path)
     data_iter = LlamaLoader(config=config, tokenizer=tokenizer, split="train")

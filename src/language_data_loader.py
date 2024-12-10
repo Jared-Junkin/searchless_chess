@@ -16,141 +16,199 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler, Sampler, R
 # goal: integrate the tokenizer with this.
 
 
+
 class BagDataset(Dataset):
     def __init__(self, data_source: Any, tokenizer: PreTrainedTokenizer, tokenizer_save_path: str, prompt_components: Optional[List[str]]=None) -> None:
         if not prompt_components:
             # default prompt
+            # prompt_components = [
+            #     "You are a chess grandmaster. This is the board position in FEN notation: ",   # fen comes after this                                                                                                        # legal moves comes after this
+            #     "What is the best move? Best move: "                                       # best move comes after this.     
+                
+            # ]
             prompt_components = [
                 "You are a chess grandmaster. This is the board position in FEN notation: ",   # fen comes after this
                 "The legal moves are: ",                                                                                                            # legal moves comes after this
                 "Which of these is the best move? Best move: "                                       # best move comes after this.     
                 
             ]
-        if len(prompt_components)!=3:
-            raise ValueError(f"Expected prompt_components to have a length of 3, but got len {len(prompt_components)}.")
+            
+        self._CHARACTERS = [
+            '0',
+            '1',
+            '2',
+            '3',
+            '4',
+            '5',
+            '6',
+            '7',
+            '8',
+            '9',
+            'a',
+            'b',
+            'c',
+            'd',
+            'e',
+            'f',
+            'g',
+            'h',
+            'p',
+            'n',
+            'r',
+            'k',
+            'q',
+            'P',
+            'B',
+            'N',
+            'R',
+            'Q',
+            'K',
+            'w',
+            '.',
+            ' '
+        ]
+        self.encodings = {key: tokenizer.convert_tokens_to_ids(key) for key in self._CHARACTERS}
+        self.encodings["<|padding|>"] = tokenizer.convert_tokens_to_ids("<|padding|>")
+        self.comma_space = tokenizer.encode(", ")
+        self._board = chess.Board()
+        self._tokenizer = tokenizer
+        self._pretokenized_prompt = [tokenizer.encode(comp) for comp in prompt_components]
+        
+        
+        # calculate buffer size
+        self._SEQUENCE_LENGTH=77 + (6*50) + sum([len(prompt) for prompt in self._pretokenized_prompt]) # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
+        
+        
+        # self._SEQUENCE_LENGTH=77+5+sum([len(prompt) for prompt in self._pretokenized_prompt])
+        
         
         self.data_source = data_source # required data source object we'll sample from
-        self._tokenizer = None
         self._move_encodings = {}
-        self._pretokenized_prompt = []
-        self._predefined_array = []
-        self._loss_mask = []
-        self._attn_mask = []
+
+        pad_token_id = tokenizer.convert_tokens_to_ids('<|padding|>')                         # get token id of pad character
+        self._predefined_array = np.full(                                                    # This array is going to be our prompty. pre-definining it so we don't have ot initialize each time
+            (self._SEQUENCE_LENGTH,), pad_token_id, dtype=np.int32
+        )
+        self._loss_mask: np.ndarray = np.full(
+            shape=(self._SEQUENCE_LENGTH,),
+            fill_value=False,
+            dtype=bool
+        )
+        
+        self._attn_mask: np.ndarray = np.full(
+            shape=(self._SEQUENCE_LENGTH,),
+            fill_value=True,
+            dtype=bool
+        )
+        
         self._last_fen = None
         self._last_best_move = None
-        self._prompt = prompt_components
-        self._save_file_name = tokenizer_save_path
-        self._init_tokenizer(tokenizer=tokenizer)
-        self._board = chess.Board()
-        
-    def _init_tokenizer(self, tokenizer: PreTrainedTokenizer)-> None:
-        # pretokenize chess moves
         all_moves = utils._compute_all_possible_actions()
         all_moves = list(all_moves[0].keys())
-        original_mappings = {move:tokenizer(move, add_special_tokens=False)["input_ids"] for move in all_moves}     # embedding of 'g1h2' before special tokens added. 'g1h2': [70, 16, 71, 17]
-        tokenizer.add_special_tokens({"additional_special_tokens": all_moves})                                      # adding tokens
-        self._tokenizer = tokenizer                                                                                 # storing tokenizer
-        final_mappings = {move: tokenizer.convert_tokens_to_ids(move) for move in all_moves}                        # embedding of 'g1h2 after special tokens added: 'g1h2': [128413]
-        
-        
-        self._move_encodings = {move: original_mappings[move] + 
-                               self._tokenizer(": ", add_special_tokens=False)["input_ids"] + 
-                               [final_mappings[move]] + 
-                               self._tokenizer(", ", add_special_tokens=False)["input_ids"] for move in all_moves}  # 'g1h2': [70, 16, 71, 17] + tokenizer(": ") + [128413] + ", "
+        self.all_move_encodings = {}
+        for move in all_moves:
+            encoding = []
+            for char in move: 
+                encoding.append(self.encodings[char])
+            self.all_move_encodings[move] = encoding
         
 
 
-        # define pretokenized prompt
-        for component in self._prompt:
-            token_ids = tokenizer(component, add_special_tokens=False)["input_ids"]
-            self._pretokenized_prompt.append(np.array(token_ids, dtype=np.int32))
+        
+    def _tokenize(self, fen: str, move: SyntaxError)->Tuple[np.ndarray, np.ndarray]:
 
-        # preallocated array
-        static_prompt_length = sum(len(comp) for comp in self._pretokenized_prompt)             # number of tokens in static prompt
-        max_encoding_length = int(np.mean([len(self._move_encodings[move]) for move in all_moves]))     # max length in tokens of a single legal move in prompt
-        dynammic_prompt_length = max_encoding_length * 80 # (empircally, there aren't any board states in dataset with more legal moves than this)                                 # max length needed for dynammic prompt (there will never by more than 128 legal moves)
-        total_prompt_length = static_prompt_length + dynammic_prompt_length + 1                 # total prompt length (+1 for legal move token at end)
         
-        pad_token_id = self._tokenizer.convert_tokens_to_ids("<|pad|>")                         # get token id of pad character
-        self._predefined_array = np.full(                                                    # This array is going to be our prompty. pre-definining it so we don't have ot initialize each time
-            (total_prompt_length,), pad_token_id, dtype=np.int32
-        )
-        
+        spaces_characters = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
+
+        # extract relevant board informatino from fen
+        board, side, castling, en_passant, halfmoves_last, fullmoves = fen.split(' ')
+        board = board.replace('/', '')
+        board = side + board
+
+        indices = list()
 
 
-        # Create the directory if it doesn't exist
-        os.makedirs(self._save_file_name, exist_ok=True)
 
-        # Save the tokenizer
-        tokenizer.save_pretrained(self._save_file_name)
+        # replace integer representations of empty space with dots (5 -> .....)
+        for char in board:
+            if char in spaces_characters:
+                indices.extend(int(char) * [self.encodings['.']])
+            else:
+                indices.append(self.encodings[char])
+        # if no one can castle, make castling ....
+        if castling == '-':
+            indices.extend(4 * [self.encodings['.']])
+        # otherwise, pad castling to be four characters exactly.
+        else:
+            for char in castling:
+                indices.append(self.encodings[char])
+            # Padding castling to have exactly 4 characters.
+            if len(castling) < 4:
+                indices.extend((4 - len(castling)) * [self.encodings['.']])
 
-        # print(f"Tokenizer saved at: {self._save_file_name}")
-        # create and save the loss mask
-        self._loss_mask: torch.Tensor = torch.full(
-            size=(total_prompt_length,),
-            fill_value=True,
-            dtype=bool,
-        )
+        # if en passant isn't possible, make it .. otherwise, it will be e3 (for example). the square where en passant is possible.
+        if en_passant == '-':
+            indices.extend(2 * [self.encodings['.']])
+        else:
+            # En passant is a square like 'e3'.
+            for char in en_passant:
+                indices.append(self.encodings[char])
+
+        # Three digits for halfmoves (since last capture) is enough since the game
+        # ends at 50. AI doesn't care about halfmoves. just noise
+        halfmoves_last += '.' * (3 - len(halfmoves_last))
+        indices.extend([self.encodings[x] for x in halfmoves_last])
+
+        # AI also doesn't care about fullmoves
+        # Three digits for full moves is enough (no game lasts longer than 999
+        # moves).
+        fullmoves += '.' * (3 - len(fullmoves))
+        indices.extend([self.encodings[x] for x in fullmoves])
         
-        self._attn_mask: torch.Tensor = torch.full(
-            size=(total_prompt_length,),
-            fill_value=True,
-            dtype=bool,
-        )
-    
-    def _tokenize(self, fen: str, move: str)->np.ndarray:
-        # should replace all this with torch.cat and make commands torch.
+        # encode best move. Encoding explicitly on a letter-by-letter basis.
+        best_move=list()
+        for char in move:
+            best_move.append(self.encodings[char])
+            # set up loss mask 
+
         
-        
-        # get legal moves
+        # add in legal moves to prompt.
         self._board.set_fen(fen=fen)
-        # tokenize fen
-        # fen_tokens = torch.tensor(self._tokenizer(fen, add_special_tokens=False)['input_ids'], dtype=torch.int32)
-        fen_tokens = np.array(self._tokenizer(fen, add_special_tokens=False)['input_ids'], dtype=np.int32)
-        # tokenize legal moves
-        # legal_moves = torch.cat([torch.tensor(self._move_encodings[str(m)], dtype=torch.int32) for m in self._board.legal_moves])
-        legal_moves = [
-                       np.array(self._move_encodings[str(m)], dtype=np.int32) for m in self._board.legal_moves
-                       ]
-        legal_moves = np.concatenate(legal_moves, axis=0)
-        # tokenize best next move
-        # move_tokens = torch.tensor(self._tokenizer(move, add_special_tokens=False)['input_ids'], dtype=torch.int32)
-        move_tokens = np.array(self._tokenizer(move, add_special_tokens=False)['input_ids'], dtype=np.int32)
-
+        legal_tokens = []
+        legal_moves = [str(m) for m in self._board.legal_moves]
+        for move in legal_moves:
+            legal_tokens.extend(self.all_move_encodings[move])
+            legal_tokens.extend(self.comma_space) # add ", " to help the LLM with readability.
+            
+        # assemble our final prompt
+        prompt_tokens = np.concatenate([
+            self._pretokenized_prompt[0],
+            indices,
+            self._pretokenized_prompt[1],
+            legal_tokens,
+            self._pretokenized_prompt[2],
+            best_move
+        ])
         
-        # assemble prompt tokens
-        # Ensure all components are ndarrays and safely clone them
-        prompt_tokens = np.concatenate(
-            [
-                self._pretokenized_prompt[0],
-                fen_tokens,
-                self._pretokenized_prompt[1],
-                legal_moves,
-                self._pretokenized_prompt[2],
-                move_tokens
-            ]
-        )
+        # define objects we're going to return 
+        predefined_array = np.copy(self._predefined_array)
+        attn_mask = np.copy(self._attn_mask)
+        loss_mask = np.copy(self._loss_mask)
         
-        predefined_array = np.copy(self._predefined_array)  # Create a copy to avoid modifying the original
-        predefined_attn_mask = np.copy(self._attn_mask)
-        
-        # Copy tokens into the preallocated array (up to its size limit)
+        # copy prompt into predefined array
         tokens_to_copy = min(len(prompt_tokens), len(predefined_array))
         predefined_array[:tokens_to_copy] = prompt_tokens[:tokens_to_copy]
-        predefined_attn_mask[:tokens_to_copy-1] = False # attend to all non-padding tokens except the target token that we're trying to predict
+
         
-        ## this code set the final entry in the array (after padding) to be the target value we wanted to predict. 
-        ## I've decided it's better practice to make the final value the model wants to predict the token immediately following the last token in the prompt
-        # # Set the final token to be best move token
-        # predefined_array[-1] = move_tokens
-        # self._attn_mask[-1] = False # attend to final token (best move)
+        # make sure loss mask aligns with tokens we want to predict
+        loss_mask[tokens_to_copy-len(best_move):tokens_to_copy] = True # calculate loss on only location of token we want to predict
         
-        # set loss mask to be false for just the targe ttoken @ predefined_array[tokens_to_copy-1] (the last non padding entry in the array)
-        predefined_loss_mask = np.copy(self._loss_mask)
-        predefined_loss_mask[tokens_to_copy-1] = False # calculate loss on only location of token we want to predict
-        
-        # return predefined array.
-        return predefined_array, predefined_attn_mask, predefined_loss_mask
+
+        assert len(predefined_array) == self._SEQUENCE_LENGTH
+
+
+        return predefined_array, attn_mask, loss_mask
+    
     
     # return the fen and move associated with the most recent element processed (hacky right now, so it won't account for batching properly)
     def getFen(self)->Tuple[str, str]:
@@ -175,6 +233,7 @@ class BagDataset(Dataset):
         return sequence, attn, loss, fen, move
     
 class LlamaLoader:
+    
     def __init__(self, 
                  config: dict,
                  tokenizer: PreTrainedTokenizer, 

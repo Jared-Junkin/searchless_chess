@@ -43,3 +43,9 @@ MANIFEST
 
 # Ignore anything inside /workspace/searchless_chess/src/pythia/
 src/pythia/
+
+# ignore all certs, public or private
+*.crt
+
+# ignore all dockerfiles
+Dockerfile*

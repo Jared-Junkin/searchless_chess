@@ -7,14 +7,15 @@ num_return_buckets: 128                     # legacy from deepmind code. not use
 shuffle: True
 worker_count: 2                       # 
 max_context_length: 1024                    # reduce memory overhead by limiting context lengths
+attn_method: "attend_to_prev_ansewrs"
 
 out_dir: '/workspace/searchless_chess/src/pythia/ckpts/'
-eval_interval: 2000
+eval_interval: 1000
 log_interval: 10
-eval_iters: 20
+eval_iters: 0
 eval_only: False                          # if True, script exits right after the first eval
 always_save_checkpoint: True               # if True, always save a checkpoint after each eval
-log_path: "/workspace/searchless_chess/src/pythia/logs/train_2.log"
+log_path: "/workspace/searchless_chess/src/pythia/logs/train_13.log"
 
 # wandb logging
 wandb_log: False                           # disabled by default. Don't want to make an account
@@ -25,7 +26,7 @@ wandb_run_name: 'pythia160M'                     # 'run' + str(time.time())
 gradient_accumulation_steps: 2             # used to simulate larger batch sizes
 
 # adamw optimizer
-learning_rate: 0.00006                      # max learning rate
+learning_rate: 0.0003                      # max learning rate
 max_iters: 600000                          # total number of training iterations
 weight_decay: 0.01
 beta1: 0.9
@@ -46,3 +47,4 @@ device_type: 'cuda'
 device: 'cuda'                             # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype: 'bfloat16'                          # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile: True                              # use PyTorch 2.0 to compile the model to be faster (jared is temporarily setting to false for debugging purposes.)
+description: "Padding replaces endoftext. legal moves in prompt. halfmoves, fullmoves, numbres indicating empty spaces are all replaced by periods, as well as - indicating no en passant or castling rights. not using attention mask (using built-in). I am shifting logits by 1 when calculating loss to avoid teacher forcing leading to trivial output."
