@@ -17,7 +17,6 @@ from typing import Tuple, Callable, Any
 import os
 from hooks import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false" # disabling Autotokenizer parallelism so we can do distributed training.
-# os.environ["WANDB_MODE"] = "offline" # disabling wandb attempting to sync with my account, which doesn't exist.
 from yaml import CLoader as Loader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import traceback
@@ -144,7 +143,7 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
         # generated_tokens = outputs[0][num_tokens:]
         # txt = tokenizer.decode(generated_tokens)
         # logger.info(f"iter: {iter_num} predictions: {txt}")
-    logger.info(f"done evals.")
+    logger.info(f"done eval")
     model.train()  # Set model back to training mode
     ### temporary code in here as a sanity check.
     return out
@@ -333,6 +332,14 @@ def training(config: dict) -> None:
     best_val_loss = float('inf')
     running_mfu = -1.0
     iter_num = 0
+    if config["wandb_log"] and master_process:
+        api_key=None
+        with open(config["wand_api_key"]) as key_file:
+            api_key = key_file.read().strip()
+        assert api_key is not None 
+        wandb.login(key=api_key)
+        wandb.init(project=config["wandb_project"], name=config["wandb_run_name"])
+        
     
     learning_rate = config["learning_rate"]
     eval_interval = config["eval_interval"]
@@ -385,7 +392,7 @@ def training(config: dict) -> None:
                 torch.save(optimizer.state_dict(), os.path.join(checkpoint_dir, "opt_state_dict.pt"))
                 
                 
-            if config["wandb_log"]:
+            if config["wandb_log"] and master_process:
                 print(f"logging wandb outside")
                 wandb.log({"val_loss": best_val_loss, "train_loss": train_loss})
             else:
@@ -405,21 +412,22 @@ def training(config: dict) -> None:
                                                                                method=config["attn_method"])
 
                 if iter_num % eval_interval == 0 and master_process:
-                    with torch.no_grad():
-                        # log_batch_details_hook
-                        log_batch_details_hook(
-                            outputs=outputs,
-                            shifted_mask=shifted_mask,
-                            shifted_labels=shifted_labels,
-                            logits=logits,
-                            iter_num=iter_num,
-                            loss=loss,
-                            config=config,
-                            tokenizer=tokenizer,
-                            logger=logger,
-                            attn_mask=attn_mask,
-                            seq_tmp=seq_tmp
-                        )
+                    logger.info(f"master proces: {master_process}, iter num: {iter_num}, micro batch: {micro_step}")
+                    # with torch.no_grad():
+                    #     # log_batch_details_hook
+                    #     log_batch_details_hook(
+                    #         outputs=outputs,
+                    #         shifted_mask=shifted_mask,
+                    #         shifted_labels=shifted_labels,
+                    #         logits=logits,
+                    #         iter_num=iter_num,
+                    #         loss=loss,
+                    #         config=config,
+                    #         tokenizer=tokenizer,
+                    #         logger=logger,
+                    #         attn_mask=attn_mask,
+                    #         seq_tmp=seq_tmp
+                    #     )
                        
 
 
@@ -436,6 +444,70 @@ def training(config: dict) -> None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
         scaler.step(optimizer)
         scaler.update()
+        if config["wandb_log"] and master_process and iter_num % log_interval == 0:
+            log_data = {}
+            nbins = 512  # Set the desired number of bins
+            bin_range = (-1, 1)  # Fixed range for bins; adjust if needed based on observed data
+            
+
+            # Log attention histograms
+            for i, attn in enumerate(outputs.attentions):
+                attn_float32 = attn.detach().cpu().to(torch.float32).numpy()
+                log_data[f"attention_layer_{i}"] = wandb.Histogram(attn_float32, num_bins=nbins)
+                ## issue is that I was calculating a histogram on this line and then passing it to wand. I want wand to calculate the histogram itself.
+                # hist_values, bin_edges = np.histogram(attn_float32, bins=nbins, range=bin_range)
+                # wandb.log({f"attention_layer_{i}": wandb.Histogram(np_histogram=(hist_values, bin_edges))})
+
+            # Access transformer layers under model
+            en_obj = enumerate(model.module.gpt_neox.layers) if ddp else enumerate(model.gpt_neox.layers)
+            for i, layer in en_obj:
+                # Query-Key-Value projections
+                qkv_weights = layer.attention.query_key_value.weight
+                qkv_grads = qkv_weights.grad
+
+                # Split into query, key, and value
+                hidden_size = qkv_weights.shape[1]
+                q_weights = qkv_weights[:hidden_size, :]
+                k_weights = qkv_weights[hidden_size:2 * hidden_size, :]
+                v_weights = qkv_weights[2 * hidden_size:, :]
+
+                q_grads = qkv_grads[:hidden_size, :] if qkv_grads is not None else None
+                k_grads = qkv_grads[hidden_size:2 * hidden_size, :] if qkv_grads is not None else None
+                v_grads = qkv_grads[2 * hidden_size:, :] if qkv_grads is not None else None
+
+                # Plot weights for KQV
+                dense_weights = layer.attention.dense.weight
+                dense_grads = dense_weights.grad
+                
+                # log weights for KQV, dense
+                q_weights_data = q_weights.detach().cpu().to(torch.float32).numpy()
+                log_data[f"q_weights_layer_{i}"] = wandb.Histogram(q_weights_data, num_bins=nbins)
+                
+                v_weights_data = v_weights.detach().cpu().to(torch.float32).numpy()
+                log_data[f"v_weights_layer_{i}"] = wandb.Histogram(v_weights_data, num_bins=nbins)
+                
+                k_weights_data = k_weights.detach().cpu().to(torch.float32).numpy()
+                log_data[f"k_weights_layer_{i}"] = wandb.Histogram(k_weights_data, num_bins=nbins)
+                
+                dense_weights_data = dense_weights.detach().cpu().to(torch.float32).numpy()
+                log_data[f"dense_weights_layer_{i}"] = wandb.Histogram(dense_weights_data, num_bins=nbins)
+                
+                
+                # log grads for KQV, dense
+                q_grads_data = q_grads.detach().cpu().to(torch.float32).numpy()
+                log_data[f"q_grads_layer{i}"] = wandb.Histogram(q_grads_data, num_bins=nbins)
+                
+                k_grads_data = k_grads.detach().cpu().to(torch.float32).numpy()
+                log_data[f"k_grads_layer{i}"] = wandb.Histogram(k_grads_data, num_bins=nbins)
+                
+                v_grads_data = v_grads.detach().cpu().to(torch.float32).numpy()
+                log_data[f"v_grads_layer{i}"] = wandb.Histogram(v_grads_data, num_bins=nbins)
+                
+                dense_grads_data = dense_grads.detach().cpu().to(torch.float32).numpy()
+                log_data[f"dense_grads_layer{i}"] = wandb.Histogram(dense_grads_data, num_bins=nbins)
+
+            wandb.log(log_data, step=iter_num)
+                    
         # flush the gradients as soon as we can, no need for this memory anymore
         optimizer.zero_grad(set_to_none=True)
         
