@@ -6,7 +6,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 # abstract hook class
 import numpy as np
-
+import wandb
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 class HookManager:
     def __init__(self)->None:
@@ -19,6 +21,56 @@ class HookManager:
         if name in self.hooks:
             self.hooks[name](*args, **kwargs)
 
+
+# def log_wand_hook(wand_log: bool, master_process: bool, iter_num: int, log_interval: int, outputs: torch.Tensor, model: AutoModelForCausalLM, ddp: bool)->None:
+#     def plot_hist_image(data: torch.Tensor, name: str)->None:
+#         data_to_plot = data.detach().cpu().to(torch.float32).numpy().ravel()
+#         plt.figure(figsize=(6,4))
+#         sns.violinplot(x=data_to_plot)
+#         plt.title(f"Distribution of {name}")
+#         wandb.log({f"{name}": wandb.Image(plt)}, step=iter_num)
+#         plt.close()
+        
+#     if wand_log and master_process and iter_num % log_interval == 0:
+
+#         # Log attention histograms
+#         for i, attn in enumerate(outputs.attentions):
+#             plot_hist_image(attn, f"attention_layer_{i}")
+
+#         # Access transformer layers under model
+#         en_obj = enumerate(model.module.gpt_neox.layers) if ddp else enumerate(model.gpt_neox.layers)
+#         for i, layer in en_obj:
+#             # Query-Key-Value projections
+#             qkv_weights = layer.attention.query_key_value.weight
+#             qkv_grads = qkv_weights.grad
+
+#             # Split into query, key, and value
+#             hidden_size = qkv_weights.shape[1]
+#             q_weights = qkv_weights[:hidden_size, :]
+#             k_weights = qkv_weights[hidden_size:2 * hidden_size, :]
+#             v_weights = qkv_weights[2 * hidden_size:, :]
+
+#             q_grads = qkv_grads[:hidden_size, :] if qkv_grads is not None else None
+#             k_grads = qkv_grads[hidden_size:2 * hidden_size, :] if qkv_grads is not None else None
+#             v_grads = qkv_grads[2 * hidden_size:, :] if qkv_grads is not None else None
+
+#             # Plot weights for KQV
+#             dense_weights = layer.attention.dense.weight
+#             dense_grads = dense_weights.grad
+            
+#             plot_hist_image(q_weights, f"q_weights_layer_{i}")
+#             plot_hist_image(k_weights, f"k_weights_layer_{i}")
+#             plot_hist_image(v_weights, f"v_weights_layer_{i}")
+#             plot_hist_image(dense_weights, f"dense_weights_layer_{i}")
+            
+#             plot_hist_image(q_grads, f"q_grads_layer_{i}")
+#             plot_hist_image(k_grads, f"k_grads_layer_{i}")
+#             plot_hist_image(v_grads, f"v_grads_layer_{i}")
+#             plot_hist_image(dense_grads, f"dense_grads_layer_{i}")
+            
+
+            
+            
 
 def get_batch_hook():
     pass

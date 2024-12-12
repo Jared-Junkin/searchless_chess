@@ -76,7 +76,7 @@ class BagDataset(Dataset):
         
         
         # calculate buffer size
-        self._SEQUENCE_LENGTH=77 + (10*45) + sum([len(prompt) for prompt in self._pretokenized_prompt]) # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
+        self._SEQUENCE_LENGTH=77 + (10*60) + sum([len(prompt) for prompt in self._pretokenized_prompt]) # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
         
         
         # self._SEQUENCE_LENGTH=77+5+sum([len(prompt) for prompt in self._pretokenized_prompt])

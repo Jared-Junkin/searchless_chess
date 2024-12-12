@@ -35,7 +35,7 @@ MANIFEST
 /src/out/
 # Ignore anything with a .log extension
 *.log
-
+logs/*
 # Ignore anything with a .ckpt extension
 *.ckpt
 
@@ -52,3 +52,6 @@ Dockerfile*
 
 # ignore all api keys 
 keys/* 
+
+# ignore everything from wandb
+src/wandb/

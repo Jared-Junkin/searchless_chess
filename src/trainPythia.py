@@ -11,6 +11,8 @@ from test import decode
 from torch.optim import Adam
 from contextlib import nullcontext
 import yaml
+from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import DistributedSampler
 import time
 import logging
 from typing import Tuple, Callable, Any
@@ -19,8 +21,8 @@ from hooks import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false" # disabling Autotokenizer parallelism so we can do distributed training.
 from yaml import CLoader as Loader
 from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 import traceback
-from hooks import HookManager, forward_step_hook, log_batch_details_hook
 
 ### Jared Imports
 from typing import Optional
@@ -286,20 +288,6 @@ def training(config: dict) -> None:
     
     
     
-    # hook_manager = HookManager()
-    # loghook = LogBatchHook()
-    # hook_manager.register_hook(loghook, context = {iter_num: int,
-    #                                                 seq: torch.Tensor,
-    #                                                 loss: torch.Tensor,
-    #                                                 loss_mask: torch.Tensor,
-    #                                                 logits: torch.Tensor,
-    #                                                 ctx,
-    #                                                 master_process: bool,
-    #                                                 log_interval: int,
-    #                                                 logger: logging.Logger,
-    #                                                 tokenizer: PreTrainedTokenizer
-    #                                                 }
-    #                             )
 
     
     
@@ -339,7 +327,9 @@ def training(config: dict) -> None:
         assert api_key is not None 
         wandb.login(key=api_key)
         wandb.init(project=config["wandb_project"], name=config["wandb_run_name"])
-        
+    if config["tens_log"]:
+        os.makedirs(config["tens_log_dir"], exist_ok=True)
+        writer = SummaryWriter(log_dir=config["tens_log_dir"])
     
     learning_rate = config["learning_rate"]
     eval_interval = config["eval_interval"]
@@ -351,7 +341,7 @@ def training(config: dict) -> None:
     # print(f"made it through test loader")
     # test_data_loader(loader=train_iter, iters=max_iters)
     gradient_accumulation_steps = config["gradient_accumulation_steps"]
-    seq, attn_mask, loss_mask,_,_ = next(train_iter)
+    seq, attn_mask, loss_mask,fen,_ = next(train_iter)
     seq = seq.to(device)
     attn_mask = attn_mask.to(device)
     loss_mask=loss_mask.to(device)
@@ -400,6 +390,9 @@ def training(config: dict) -> None:
 
         # Training step (including gradient accumulation)
         # logger.info(f"reached this line in iter {iter_num}")
+        ## this prints the batch data across each individual process. should be different.
+        # print(f"Rank {dist.get_rank()} - First sample FEN: {fen[0]}")
+        # dist.barrier()
         for micro_step in range(gradient_accumulation_steps):
             if ddp:
                 model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
@@ -411,23 +404,23 @@ def training(config: dict) -> None:
                                                                                gradient_accumulation_steps=gradient_accumulation_steps,
                                                                                method=config["attn_method"])
 
-                if iter_num % eval_interval == 0 and master_process:
+                if iter_num % eval_interval == 0 and master_process and micro_step==0: # making it so only one micro step can log
                     logger.info(f"master proces: {master_process}, iter num: {iter_num}, micro batch: {micro_step}")
-                    # with torch.no_grad():
-                    #     # log_batch_details_hook
-                    #     log_batch_details_hook(
-                    #         outputs=outputs,
-                    #         shifted_mask=shifted_mask,
-                    #         shifted_labels=shifted_labels,
-                    #         logits=logits,
-                    #         iter_num=iter_num,
-                    #         loss=loss,
-                    #         config=config,
-                    #         tokenizer=tokenizer,
-                    #         logger=logger,
-                    #         attn_mask=attn_mask,
-                    #         seq_tmp=seq_tmp
-                    #     )
+                    with torch.no_grad():
+                        # log_batch_details_hook
+                        log_batch_details_hook(
+                            outputs=outputs,
+                            shifted_mask=shifted_mask,
+                            shifted_labels=shifted_labels,
+                            logits=logits,
+                            iter_num=iter_num,
+                            loss=loss,
+                            config=config,
+                            tokenizer=tokenizer,
+                            logger=logger,
+                            attn_mask=attn_mask,
+                            seq_tmp=seq_tmp
+                        )
                        
 
 
@@ -442,73 +435,71 @@ def training(config: dict) -> None:
         if config["grad_clip"] != 0.0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
+        
+        ## this code verifies that the gradients across all process are synced after the gradient accumulation steps.
+        # param_name, param = list(model.named_parameters())[0]
+        # grad_norm = param.grad.data.norm().item()
+        # print(f"Rank {dist.get_rank()} - {param_name} grad norm after all microsteps: {grad_norm}")
+        # dist.barrier()
+
         scaler.step(optimizer)
         scaler.update()
-        if config["wandb_log"] and master_process and iter_num % log_interval == 0:
-            log_data = {}
+        
+        # log to wand if we want to.
+        # log_wand_hook(wand_log = config["wandb_log"],
+        #               master_process=master_process,
+        #               iter_num=iter_num,
+        #               log_interval=log_interval,
+        #               outputs=outputs,
+        #               model=model,
+        #               ddp=ddp)
+        # flush the gradients as soon as we can, no need for this memory anymore
+        if config["tens_log"] and master_process and iter_num % (eval_interval//2) == 0:
+            logger.info(f"logging tensorboard on iter {iter_num}")
             nbins = 512  # Set the desired number of bins
-            bin_range = (-1, 1)  # Fixed range for bins; adjust if needed based on observed data
-            
+            # bin_range = (-1, 1)  # If you need a specific range, tensorboard handles bins internally
 
             # Log attention histograms
             for i, attn in enumerate(outputs.attentions):
                 attn_float32 = attn.detach().cpu().to(torch.float32).numpy()
-                log_data[f"attention_layer_{i}"] = wandb.Histogram(attn_float32, num_bins=nbins)
-                ## issue is that I was calculating a histogram on this line and then passing it to wand. I want wand to calculate the histogram itself.
-                # hist_values, bin_edges = np.histogram(attn_float32, bins=nbins, range=bin_range)
-                # wandb.log({f"attention_layer_{i}": wandb.Histogram(np_histogram=(hist_values, bin_edges))})
+                writer.add_histogram(f"attention_layer_{i}", attn_float32, global_step=iter_num, bins=nbins)
 
-            # Access transformer layers under model
+            # Access transformer layers
             en_obj = enumerate(model.module.gpt_neox.layers) if ddp else enumerate(model.gpt_neox.layers)
             for i, layer in en_obj:
                 # Query-Key-Value projections
                 qkv_weights = layer.attention.query_key_value.weight
                 qkv_grads = qkv_weights.grad
 
-                # Split into query, key, and value
                 hidden_size = qkv_weights.shape[1]
-                q_weights = qkv_weights[:hidden_size, :]
-                k_weights = qkv_weights[hidden_size:2 * hidden_size, :]
-                v_weights = qkv_weights[2 * hidden_size:, :]
+                q_weights = qkv_weights[:hidden_size, :].detach().cpu().float().numpy()
+                k_weights = qkv_weights[hidden_size:2 * hidden_size, :].detach().cpu().float().numpy()
+                v_weights = qkv_weights[2 * hidden_size:, :].detach().cpu().float().numpy()
 
-                q_grads = qkv_grads[:hidden_size, :] if qkv_grads is not None else None
-                k_grads = qkv_grads[hidden_size:2 * hidden_size, :] if qkv_grads is not None else None
-                v_grads = qkv_grads[2 * hidden_size:, :] if qkv_grads is not None else None
+                # Log weights
+                writer.add_histogram(f"q_weights_layer_{i}", q_weights, global_step=iter_num, bins=nbins)
+                writer.add_histogram(f"k_weights_layer_{i}", k_weights, global_step=iter_num, bins=nbins)
+                writer.add_histogram(f"v_weights_layer_{i}", v_weights, global_step=iter_num, bins=nbins)
 
-                # Plot weights for KQV
+                # Dense weights
                 dense_weights = layer.attention.dense.weight
-                dense_grads = dense_weights.grad
-                
-                # log weights for KQV, dense
-                q_weights_data = q_weights.detach().cpu().to(torch.float32).numpy()
-                log_data[f"q_weights_layer_{i}"] = wandb.Histogram(q_weights_data, num_bins=nbins)
-                
-                v_weights_data = v_weights.detach().cpu().to(torch.float32).numpy()
-                log_data[f"v_weights_layer_{i}"] = wandb.Histogram(v_weights_data, num_bins=nbins)
-                
-                k_weights_data = k_weights.detach().cpu().to(torch.float32).numpy()
-                log_data[f"k_weights_layer_{i}"] = wandb.Histogram(k_weights_data, num_bins=nbins)
-                
-                dense_weights_data = dense_weights.detach().cpu().to(torch.float32).numpy()
-                log_data[f"dense_weights_layer_{i}"] = wandb.Histogram(dense_weights_data, num_bins=nbins)
-                
-                
-                # log grads for KQV, dense
-                q_grads_data = q_grads.detach().cpu().to(torch.float32).numpy()
-                log_data[f"q_grads_layer{i}"] = wandb.Histogram(q_grads_data, num_bins=nbins)
-                
-                k_grads_data = k_grads.detach().cpu().to(torch.float32).numpy()
-                log_data[f"k_grads_layer{i}"] = wandb.Histogram(k_grads_data, num_bins=nbins)
-                
-                v_grads_data = v_grads.detach().cpu().to(torch.float32).numpy()
-                log_data[f"v_grads_layer{i}"] = wandb.Histogram(v_grads_data, num_bins=nbins)
-                
-                dense_grads_data = dense_grads.detach().cpu().to(torch.float32).numpy()
-                log_data[f"dense_grads_layer{i}"] = wandb.Histogram(dense_grads_data, num_bins=nbins)
+                dense_weights_data = dense_weights.detach().cpu().float().numpy()
+                writer.add_histogram(f"dense_weights_layer_{i}", dense_weights_data, global_step=iter_num, bins=nbins)
 
-            wandb.log(log_data, step=iter_num)
-                    
-        # flush the gradients as soon as we can, no need for this memory anymore
+                # Log gradients if available
+                if qkv_grads is not None:
+                    q_grads = qkv_grads[:hidden_size, :].detach().cpu().float().numpy()
+                    k_grads = qkv_grads[hidden_size:2 * hidden_size, :].detach().cpu().float().numpy()
+                    v_grads = qkv_grads[2 * hidden_size:, :].detach().cpu().float().numpy()
+
+                    writer.add_histogram(f"q_grads_layer{i}", q_grads, global_step=iter_num, bins=nbins)
+                    writer.add_histogram(f"k_grads_layer{i}", k_grads, global_step=iter_num, bins=nbins)
+                    writer.add_histogram(f"v_grads_layer{i}", v_grads, global_step=iter_num, bins=nbins)
+
+                dense_grads = dense_weights.grad
+                if dense_grads is not None:
+                    dense_grads_data = dense_grads.detach().cpu().float().numpy()
+                    writer.add_histogram(f"dense_grads_layer{i}", dense_grads_data, global_step=iter_num, bins=nbins)
         optimizer.zero_grad(set_to_none=True)
         
 
