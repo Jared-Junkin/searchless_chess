@@ -49,3 +49,6 @@ src/pythia/
 
 # ignore all dockerfiles
 Dockerfile*
+
+src/wandb/*
+logs/
