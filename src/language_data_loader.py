@@ -18,7 +18,13 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler, Sampler, R
 
 
 class BagDataset(Dataset):
-    def __init__(self, data_source: Any, tokenizer: PreTrainedTokenizer, tokenizer_save_path: str, prompt_components: Optional[List[str]]=None) -> None:
+    def __init__(self, 
+                 data_source: Any, 
+                 tokenizer: PreTrainedTokenizer, 
+                 tokenizer_save_path: str, 
+                 prompt_components: Optional[List[str]]=None, 
+                 pad_token: str = "<|padding|>",
+                 eot_token: str = "<|endoftext|>") -> None:
         if not prompt_components:
             # default prompt
             # prompt_components = [
@@ -68,7 +74,7 @@ class BagDataset(Dataset):
             ' '
         ]
         self.encodings = {key: tokenizer.convert_tokens_to_ids(key) for key in self._CHARACTERS}
-        self.encodings["<|padding|>"] = tokenizer.convert_tokens_to_ids("<|padding|>")
+        self.encodings[pad_token] = tokenizer.convert_tokens_to_ids(pad_token)
         self.comma_space = tokenizer.encode(", ")
         self._board = chess.Board()
         self._tokenizer = tokenizer
@@ -76,7 +82,7 @@ class BagDataset(Dataset):
         
         
         # calculate buffer size
-        self._SEQUENCE_LENGTH=77 + (10*60) + sum([len(prompt) for prompt in self._pretokenized_prompt]) # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
+        self._SEQUENCE_LENGTH=77 + (6*60) + sum([len(prompt) for prompt in self._pretokenized_prompt]) # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
         
         
         # self._SEQUENCE_LENGTH=77+5+sum([len(prompt) for prompt in self._pretokenized_prompt])
@@ -84,8 +90,9 @@ class BagDataset(Dataset):
         
         self.data_source = data_source # required data source object we'll sample from
         self._move_encodings = {}
+        self.eot_id = [tokenizer.convert_tokens_to_ids(eot_token)] # end of text token to put at end.
 
-        pad_token_id = tokenizer.convert_tokens_to_ids('<|padding|>')                         # get token id of pad character
+        pad_token_id = tokenizer.convert_tokens_to_ids(pad_token)                         # get token id of pad character
         self._predefined_array = np.full(                                                    # This array is going to be our prompty. pre-definining it so we don't have ot initialize each time
             (self._SEQUENCE_LENGTH,), pad_token_id, dtype=np.int32
         )
@@ -105,27 +112,17 @@ class BagDataset(Dataset):
         self._last_best_move = None
         all_moves = utils._compute_all_possible_actions()
         all_moves = list(all_moves[0].keys())
-        original_mappings = {}
+        self.all_move_encodings = {}
         for move in all_moves:
             encoding = []
             for char in move: 
                 encoding.append(self.encodings[char])
-            original_mappings[move] = encoding
-            
-        self._tokenizer.add_special_tokens({"additional_special_tokens": all_moves})                                      # adding new tokens for each move
-                                                                              # storing tokenizer
-        final_mappings = {move: tokenizer.convert_tokens_to_ids(move) for move in all_moves}                        # embedding of 'g1h2 after special tokens added: 'g1h2': [128413]
+            self.all_move_encodings[move] = encoding
         
-        self.all_move_encodings = {move: original_mappings[move] + 
-                               self._tokenizer(": ", add_special_tokens=False)["input_ids"] + 
-                               [final_mappings[move]] + 
-                               self._tokenizer(", ", add_special_tokens=False)["input_ids"] for move in all_moves}  # 'g1h2': [70, 16, 71, 17] + tokenizer(": ") + [128413] + ", "
-        
-        self._tokenizer.save_pretrained(tokenizer_save_path)
+
 
         
     def _tokenize(self, fen: str, move: SyntaxError)->Tuple[np.ndarray, np.ndarray]:
-        
 
         
         spaces_characters = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
@@ -175,17 +172,20 @@ class BagDataset(Dataset):
         fullmoves += '.' * (3 - len(fullmoves))
         indices.extend([self.encodings[x] for x in fullmoves])
         
-        # encode best move. Encoding as a single token.
-        best_move = self._tokenizer.encode(move)
+        # encode best move. Encoding explicitly on a letter-by-letter basis.
+        best_move=list()
+        for char in move:
+            best_move.append(self.encodings[char])
+            # set up loss mask 
 
         
         # add in legal moves to prompt.
         self._board.set_fen(fen=fen)
         legal_tokens = []
         legal_moves = [str(m) for m in self._board.legal_moves]
-        for legal_move in legal_moves:
-            legal_tokens.extend(self.all_move_encodings[legal_move])
-            # legal_tokens.extend(self.comma_space) # add ", " to help the LLM with readability.
+        for move in legal_moves:
+            legal_tokens.extend(self.all_move_encodings[move])
+            legal_tokens.extend(self.comma_space) # add ", " to help the LLM with readability.
             
         # assemble our final prompt
         prompt_tokens = np.concatenate([
@@ -194,7 +194,8 @@ class BagDataset(Dataset):
             self._pretokenized_prompt[1],
             legal_tokens,
             self._pretokenized_prompt[2],
-            best_move
+            best_move,
+            self.eot_id
         ])
         
         # define objects we're going to return 
@@ -205,12 +206,14 @@ class BagDataset(Dataset):
         # copy prompt into predefined array
         tokens_to_copy = min(len(prompt_tokens), len(predefined_array))
         predefined_array[:tokens_to_copy] = prompt_tokens[:tokens_to_copy]
+        
+        # set the model only to attend to non-padding tokens.
+        attn_mask[:tokens_to_copy] = True
 
         
         # make sure loss mask aligns with tokens we want to predict
-        loss_mask[tokens_to_copy-len(best_move):tokens_to_copy] = True # calculate loss on only location of token we want to predict
-        # mask out padding tokens from attending to anything
-        attn_mask[:tokens_to_copy-1] = True
+        loss_mask[tokens_to_copy-len(best_move)-1:tokens_to_copy] = True # calculate loss on only location of token we want to predict (-1 in there because we want it to predict <|endoftext|>)
+        
 
         assert len(predefined_array) == self._SEQUENCE_LENGTH
 
@@ -243,23 +246,23 @@ class BagDataset(Dataset):
 class LlamaLoader:
     
     def __init__(self, 
-                 config: dict,
+                 training_config: dict,
                  tokenizer: PreTrainedTokenizer, 
                  split: str,
                  data_dir: str = "/workspace/searchless_chess/data",
                  data_source_name: str="behavioral_cloning_data.bag",
                  )->None:
         
-        world_size = config["ddp_world_size"]
-        rank = config["ddp_local_rank"]
+        world_size = training_config["ddp_world_size"]
+        rank = training_config["ddp_local_rank"]
         config = LanguageDataConfig(
-            batch_size= config["batch_size"],
+            batch_size= training_config["batch_size"],
             tokenizer=tokenizer,
-            tokenizer_save_path=config["out_dir"],
-            shuffle=config["shuffle"],
-            worker_count=config["worker_count"],  # 0 disables multiprocessing.
-            num_return_buckets=config["num_return_buckets"],
-            policy=config["policy"],
+            tokenizer_save_path=training_config["out_dir"],
+            shuffle=training_config["shuffle"],
+            worker_count=training_config["worker_count"],  # 0 disables multiprocessing.
+            num_return_buckets=training_config["num_return_buckets"],
+            policy=training_config["policy"],
             split=split,
         )
         """Returns a data loader for chess from the config."""
@@ -282,6 +285,7 @@ class LlamaLoader:
         dataset: Dataset = BagDataset(tokenizer=config.tokenizer, 
                                     tokenizer_save_path=config.tokenizer_save_path,
                                     data_source=data_source,
+                                    pad_token=training_config["pad_token"],
                                     prompt_components=None
                                     )
         if world_size > 1:

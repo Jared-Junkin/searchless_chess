@@ -1,8 +1,8 @@
 from transformers import GPTNeoXForCausalLM, AutoTokenizer
 
 # Load model and tokenizer
-# local_dir = "./pythia-160m/"
-local_dir = "./ckpts/ckpt6000"
+local_dir = "./pythia-160m/"
+# local_dir = "./ckpts/ckpt6000"
 model = GPTNeoXForCausalLM.from_pretrained(local_dir)
 tokenizer = AutoTokenizer.from_pretrained(local_dir)
 

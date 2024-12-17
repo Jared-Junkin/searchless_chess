@@ -150,22 +150,28 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
     ### temporary code in here as a sanity check.
     return out
 
+import os
+import torch
+from torch.optim import Adam
 
-# Ensure this runs within each DDP process
-def create_optimizer(model: AutoModelForCausalLM, config: dict) -> Adam:
+def create_optimizer(model, config: dict) -> Adam:
     # Extract optimizer configuration
     weight_decay = config['weight_decay']
     learning_rate = config['learning_rate']
     betas = (config['beta1'], config['beta2'])
-    device_type = config['device_type']  # GPU/CPU setup
-    
-    # Check device placement for parameters
-    if device_type == 'cuda':
-        # Ensure parameters are on the correct device
-        model = model.to(torch.cuda.current_device())
-    else:
-        model = model.to(device_type)
-    
+    device = config["device"]  # e.g. 'cuda:1' or 'cpu'
+
+    # Check if we are in DDP mode
+    ddp_mode = 'LOCAL_RANK' in os.environ
+
+    if ddp_mode:
+        # If in DDP mode, we rely on local rank for setting device
+        local_rank = int(os.environ['LOCAL_RANK'])
+        torch.cuda.set_device(local_rank)
+        device = f'cuda:{local_rank}'
+    # Move model to the specified device
+    model = model.to(device)
+
     # Create optimizer
     optimizer = Adam(
         model.parameters(),
@@ -174,6 +180,7 @@ def create_optimizer(model: AutoModelForCausalLM, config: dict) -> Adam:
         weight_decay=weight_decay
     )
     return optimizer
+
 
 
 
@@ -280,7 +287,6 @@ def training(config: dict) -> None:
     ctx = nullcontext() if config['device_type'] == 'cpu' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
     scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
-    
     # load model, tokenizer, dataloader
     # this tokenizer won't match exactly to begin with in terms of size because it is GPT4NeoXTokenizer and I'm using a pythia model. similar size of vocab size but not identical, because there are certain reserved tokens the model doesn't care about.
     model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
@@ -298,12 +304,22 @@ def training(config: dict) -> None:
     # model.model.embed_tokens.weight.data = new_positinal_embeddings
     
     config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
-    model.to(device)
+    
+
+        
     ## create dataloader
-    train_iter = LlamaLoader(config=config, tokenizer=tokenizer, split="train")
+    train_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="train")
     model.resize_token_embeddings(len(tokenizer)) # must resize the length of the modelstoken embeddings because we've added tokens to the tokenizer
     ## create optimizer 
     optimizer = create_optimizer(model, config)
+        ## store initial params for F2 regularization penalty
+    if config["F2_regularization"]:
+        with torch.no_grad():
+            initial_params = []
+            for (name, p) in model.named_parameters():
+                if p.requires_grad:
+                    initial_params.append(p.view(-1))
+            initial_params_flat = torch.cat(initial_params) 
     print(optimizer)
     
     if ddp:
@@ -320,13 +336,6 @@ def training(config: dict) -> None:
     best_val_loss = float('inf')
     running_mfu = -1.0
     iter_num = 0
-    if config["wandb_log"] and master_process:
-        api_key=None
-        with open(config["wand_api_key"]) as key_file:
-            api_key = key_file.read().strip()
-        assert api_key is not None 
-        wandb.login(key=api_key)
-        wandb.init(project=config["wandb_project"], name=config["wandb_run_name"])
     if config["tens_log"]:
         os.makedirs(config["tens_log_dir"], exist_ok=True)
         writer = SummaryWriter(log_dir=config["tens_log_dir"])
@@ -335,7 +344,7 @@ def training(config: dict) -> None:
     eval_interval = config["eval_interval"]
     always_save_checkpoint = config["always_save_checkpoint"]
     
-    test_iter = LlamaLoader(config=config, tokenizer=tokenizer, split="test")
+    test_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="test")
     ## unit tests to make sure the dataloaders can repeat over dataset and not raise stopIteration errors
     # test_data_loader(loader=test_iter, iters=10*len(test_iter))
     # print(f"made it through test loader")
@@ -381,29 +390,31 @@ def training(config: dict) -> None:
                 # torch.save(optimizer.state_dict(), checkpoint_dir)
                 torch.save(optimizer.state_dict(), os.path.join(checkpoint_dir, "opt_state_dict.pt"))
                 
-                
-            if config["wandb_log"] and master_process:
-                print(f"logging wandb outside")
-                wandb.log({"val_loss": best_val_loss, "train_loss": train_loss})
-            else:
-                print("not using wandb")
 
         # Training step (including gradient accumulation)
         # logger.info(f"reached this line in iter {iter_num}")
         ## this prints the batch data across each individual process. should be different.
         # print(f"Rank {dist.get_rank()} - First sample FEN: {fen[0]}")
         # dist.barrier()
+        acc = 0
+        loss_avg = 0
+        avg_correct_prob = 0
+        avg_chosen_prob = 0
         for micro_step in range(gradient_accumulation_steps):
             if ddp:
                 model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
             with ctx:
-                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask = forward_step_hook(seq=seq,
+                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = forward_step_hook(seq=seq,
                                                                                loss_mask=loss_mask,
                                                                                attn_mask=attn_mask,
                                                                                model=model,
                                                                                gradient_accumulation_steps=gradient_accumulation_steps,
                                                                                method=config["attn_method"])
 
+                acc += sequence_accuracy
+                avg_correct_prob += mean_correct_prob
+                avg_chosen_prob += mean_chosen_prob
+                loss_avg += loss
                 if iter_num % eval_interval == 0 and master_process and micro_step==0: # making it so only one micro step can log
                     logger.info(f"master proces: {master_process}, iter num: {iter_num}, micro batch: {micro_step}")
                     with torch.no_grad():
@@ -428,10 +439,18 @@ def training(config: dict) -> None:
             seq = seq.to(device)
             loss_mask = loss_mask.to(device)
             attn_mask = attn_mask.to(device)
+            # Only apply F2 penalty on the final micro-step before backpropagating the full batch loss
+            if micro_step == gradient_accumulation_steps - 1 and config["F2_regularization"]:
+                loss = F2_loss_hook(
+                    model=model,
+                    F2_lambda=config["f2_lambda"],
+                    initial_params_flat=initial_params_flat,
+                    loss=loss
+                )
             
             # Backward pass with gradient scaling for mixed precision
             scaler.scale(loss).backward()
-
+        acc /= gradient_accumulation_steps
         if config["grad_clip"] != 0.0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
@@ -454,52 +473,52 @@ def training(config: dict) -> None:
         #               model=model,
         #               ddp=ddp)
         # flush the gradients as soon as we can, no need for this memory anymore
-        if config["tens_log"] and master_process and iter_num % (eval_interval//2) == 0:
-            logger.info(f"logging tensorboard on iter {iter_num}")
-            nbins = 512  # Set the desired number of bins
-            # bin_range = (-1, 1)  # If you need a specific range, tensorboard handles bins internally
+        # if config["tens_log"] and master_process and iter_num % (eval_interval//2) == 0:
+        #     logger.info(f"logging tensorboard on iter {iter_num}")
+        #     nbins = 512  # Set the desired number of bins
+        #     # bin_range = (-1, 1)  # If you need a specific range, tensorboard handles bins internally
 
-            # Log attention histograms
-            for i, attn in enumerate(outputs.attentions):
-                attn_float32 = attn.detach().cpu().to(torch.float32).numpy()
-                writer.add_histogram(f"attention_layer_{i}", attn_float32, global_step=iter_num, bins=nbins)
+        #     # Log attention histograms
+        #     for i, attn in enumerate(outputs.attentions):
+        #         attn_float32 = attn.detach().cpu().to(torch.float32).numpy()
+        #         writer.add_histogram(f"attention_layer_{i}", attn_float32, global_step=iter_num, bins=nbins)
 
-            # Access transformer layers
-            en_obj = enumerate(model.module.gpt_neox.layers) if ddp else enumerate(model.gpt_neox.layers)
-            for i, layer in en_obj:
-                # Query-Key-Value projections
-                qkv_weights = layer.attention.query_key_value.weight
-                qkv_grads = qkv_weights.grad
+        #     # Access transformer layers
+        #     en_obj = enumerate(model.module.gpt_neox.layers) if ddp else enumerate(model.gpt_neox.layers)
+        #     for i, layer in en_obj:
+        #         # Query-Key-Value projections
+        #         qkv_weights = layer.attention.query_key_value.weight
+        #         qkv_grads = qkv_weights.grad
 
-                hidden_size = qkv_weights.shape[1]
-                q_weights = qkv_weights[:hidden_size, :].detach().cpu().float().numpy()
-                k_weights = qkv_weights[hidden_size:2 * hidden_size, :].detach().cpu().float().numpy()
-                v_weights = qkv_weights[2 * hidden_size:, :].detach().cpu().float().numpy()
+        #         hidden_size = qkv_weights.shape[1]
+        #         q_weights = qkv_weights[:hidden_size, :].detach().cpu().float().numpy()
+        #         k_weights = qkv_weights[hidden_size:2 * hidden_size, :].detach().cpu().float().numpy()
+        #         v_weights = qkv_weights[2 * hidden_size:, :].detach().cpu().float().numpy()
 
-                # Log weights
-                writer.add_histogram(f"q_weights_layer_{i}", q_weights, global_step=iter_num, bins=nbins)
-                writer.add_histogram(f"k_weights_layer_{i}", k_weights, global_step=iter_num, bins=nbins)
-                writer.add_histogram(f"v_weights_layer_{i}", v_weights, global_step=iter_num, bins=nbins)
+        #         # Log weights
+        #         writer.add_histogram(f"q_weights_layer_{i}", q_weights, global_step=iter_num, bins=nbins)
+        #         writer.add_histogram(f"k_weights_layer_{i}", k_weights, global_step=iter_num, bins=nbins)
+        #         writer.add_histogram(f"v_weights_layer_{i}", v_weights, global_step=iter_num, bins=nbins)
 
-                # Dense weights
-                dense_weights = layer.attention.dense.weight
-                dense_weights_data = dense_weights.detach().cpu().float().numpy()
-                writer.add_histogram(f"dense_weights_layer_{i}", dense_weights_data, global_step=iter_num, bins=nbins)
+        #         # Dense weights
+        #         dense_weights = layer.attention.dense.weight
+        #         dense_weights_data = dense_weights.detach().cpu().float().numpy()
+        #         writer.add_histogram(f"dense_weights_layer_{i}", dense_weights_data, global_step=iter_num, bins=nbins)
 
-                # Log gradients if available
-                if qkv_grads is not None:
-                    q_grads = qkv_grads[:hidden_size, :].detach().cpu().float().numpy()
-                    k_grads = qkv_grads[hidden_size:2 * hidden_size, :].detach().cpu().float().numpy()
-                    v_grads = qkv_grads[2 * hidden_size:, :].detach().cpu().float().numpy()
+        #         # Log gradients if available
+        #         if qkv_grads is not None:
+        #             q_grads = qkv_grads[:hidden_size, :].detach().cpu().float().numpy()
+        #             k_grads = qkv_grads[hidden_size:2 * hidden_size, :].detach().cpu().float().numpy()
+        #             v_grads = qkv_grads[2 * hidden_size:, :].detach().cpu().float().numpy()
 
-                    writer.add_histogram(f"q_grads_layer{i}", q_grads, global_step=iter_num, bins=nbins)
-                    writer.add_histogram(f"k_grads_layer{i}", k_grads, global_step=iter_num, bins=nbins)
-                    writer.add_histogram(f"v_grads_layer{i}", v_grads, global_step=iter_num, bins=nbins)
+        #             writer.add_histogram(f"q_grads_layer{i}", q_grads, global_step=iter_num, bins=nbins)
+        #             writer.add_histogram(f"k_grads_layer{i}", k_grads, global_step=iter_num, bins=nbins)
+        #             writer.add_histogram(f"v_grads_layer{i}", v_grads, global_step=iter_num, bins=nbins)
 
-                dense_grads = dense_weights.grad
-                if dense_grads is not None:
-                    dense_grads_data = dense_grads.detach().cpu().float().numpy()
-                    writer.add_histogram(f"dense_grads_layer{i}", dense_grads_data, global_step=iter_num, bins=nbins)
+        #         dense_grads = dense_weights.grad
+        #         if dense_grads is not None:
+        #             dense_grads_data = dense_grads.detach().cpu().float().numpy()
+        #             writer.add_histogram(f"dense_grads_layer{i}", dense_grads_data, global_step=iter_num, bins=nbins)
         optimizer.zero_grad(set_to_none=True)
         
 
@@ -507,15 +526,17 @@ def training(config: dict) -> None:
         dt = t1 - t0
         t0 = t1
         if iter_num % log_interval == 0:
-            loss_value = loss.item() * gradient_accumulation_steps
+            loss_value = loss_avg
+            # loss_value = loss.item() # not multiplying by # of gradient accumulation steps. want avg loss so I can get a good idea of how the loss changes
             if local_iter_num >= 5: # let the training loop settle a bit
                 mfu = 0 # TODO: replace with mfu function later.
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
             if master_process:
-                logger.info(f"iter {iter_num}: loss {loss_value:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+                logger.info(f"iter {iter_num}: loss {loss_value:.4f}, time {(dt/gradient_accumulation_steps)*1000:.2f}ms, seq_acc: {acc*100:.2f}%, gt. conf: {avg_correct_prob/gradient_accumulation_steps:.4f}, ans. conf: {avg_chosen_prob/gradient_accumulation_steps:.4f} diff: {(avg_chosen_prob/gradient_accumulation_steps - avg_correct_prob/gradient_accumulation_steps):.4f}")
                 if config["wandb_log"]:
                     print(f"logging wandb outside loop")
-                    wandb.log({"val_loss": best_val_loss, "train_loss": loss_value})
+                    # wandb.log({"val_loss": best_val_loss, "train_loss": loss_value})
+                    wandb.log({"train_loss": loss_value, "seq_acc": acc*100, "time": dt/gradient_accumulation_steps*1000, "gt. conf:": avg_correct_prob/gradient_accumulation_steps, "ans. confg": avg_chosen_prob/gradient_accumulation_steps, "diff": (avg_chosen_prob/gradient_accumulation_steps - avg_correct_prob/gradient_accumulation_steps)})
                 else:
                     print(f"not using wandb outside loop")
         iter_num += 1
@@ -530,7 +551,7 @@ def training(config: dict) -> None:
         
 
 
-def sweep_hyperparameters(config: dict, sweep_runs: int = 10) -> None:
+def sweep_hyperparameters(config: dict, sweep_runs: int = 30) -> None:
     """
     Perform a hyperparameter sweep by repeatedly modifying the config
     and calling the training function.
@@ -543,12 +564,12 @@ def sweep_hyperparameters(config: dict, sweep_runs: int = 10) -> None:
     sweep_config = {
         "name": "Hyperparameter Sweep",
         "method": "bayes",  # Use Bayesian optimization
-        "metric": {"name": "val_loss", "goal": "minimize"},
+        "metric": {"name": "train_loss", "goal": "minimize"},
         "parameters": {
-            "batch_size": {"values": [16, 32, 64]},
-            "learning_rate": {"distribution": "uniform", "min": 1e-5, "max": 1e-4},
-            "weight_decay": {"distribution": "uniform", "min": 1e-5, "max": 1e-2},
-            "gradient_accumulation_steps": {"values": [2, 4, 8]},
+            "learning_rate": {"distribution": "uniform", "min": 0.00009, "max": 0.0009},
+            "lr_decay_iters": {"values": [60000, 600000, 6000000]}, # in my current setup, this will control how quickly the learning rate decays. less iters means it decays more quickly.
+            "gradient_accumulation_steps": {"values": [4, 8, 32, 80, 160]},
+            "f2_lambda": {"values": [0.0006, 0.0001, 0.00006]}
         },
     }
 
@@ -556,36 +577,49 @@ def sweep_hyperparameters(config: dict, sweep_runs: int = 10) -> None:
     sweep_id = wandb.sweep(sweep_config, project=config["wandb_project"])
 
     def train_with_wandb():
-        """
-        Inner function called by WandB agent for each sweep run.
-        """
-        # Initialize WandB and get the run-specific hyperparameters
-        wandb.init(project=config["wandb_project"], name=config["wandb_run_name"])
+        wandb.init(project=config["wandb_project"])  # initialize wandb
         sweep_params = wandb.config
+        
+        unique_run_name = (f"{config['wandb_run_name']}_lr{config['learning_rate']:.5e}"
+                           f"_gas{config['gradient_accumulation_steps']}"
+                           f"_lambda{config['f2_lambda']}"
+                           f"_decay{config['lr_decay_iters']}_{int(time.time())}")
 
-        # Update config with sweep parameters
-        config["batch_size"] = sweep_params.batch_size
+        wandb.run.name = unique_run_name
+        
         config["learning_rate"] = sweep_params.learning_rate
-        config["decay_lr"] = sweep_params.weight_decay
-        config["wandb_log"] = True  # Enable WandB logging for this run
+        config["min_lr"] = sweep_params.learning_rate/10
+        config["lr_decay_iters"] = sweep_params.lr_decay_iters
         config["gradient_accumulation_steps"] = sweep_params.gradient_accumulation_steps
-        # Call the unmodified training function
+        config["wandb_log"] = True
+        config["f2_lambda"] = sweep_params.f2_lambda
+        
+
+        # Debug print
+        print(f"Starting run: {unique_run_name}")
         training(config)
 
     # Launch the sweep
     wandb.agent(sweep_id, function=train_with_wandb, count=sweep_runs)
 
+
+
+
+        # # Construct a unique run name for logging clarity
+        # unique_run_name = (f"{config_run['wandb_run_name']}_lr{config_run['learning_rate']:.5e}"
+        #                    f"_gas{config_run['gradient_accumulation_steps']}"
+        #                    f"_lambda{config_run['f2_lambda']}"
+        #                    f"_decay{config_run['lr_decay_iters']}_{int(time.time())}")
     
 if __name__ == "__main__":
 
-    # config_file = "/workspace/searchless_chess/src/config_hypsweep.yaml"
-    config_file = "/workspace/searchless_chess/src/config_pythia.yaml"
+    config_file = "/workspace/searchless_chess/src/config_pthia_hypsweep.yaml"  # config file for wandb hyperparameter sweep
+    # config_file = "/workspace/searchless_chess/src/config_pythia.yaml"        # config for pythia training from scratch
+    # config_file = "/workspace/searchless_chess/src/config_llama.yaml"         # config for llama training from scratch
+
     with open(config_file, "r") as stream:
         config = yaml.load(stream=stream, Loader=Loader)
 
-    run_with_error_handling(training, config=config, log_path=config["log_path"])
-    # sweep_hyperparameters(config=config, sweep_runs=20)
+    # run_with_error_handling(training, config=config, log_path=config["log_path"])
+    run_with_error_handling(sweep_hyperparameters, config=config, log_path=config["log_path"])
     
-    # local_dir = "./Llama/llama-3.2-1B"
-    # model = AutoModelForCausalLM.from_pretrained(local_dir)
-    # tokenizer = AutoTokenizer.from_pretrained(local_dir)

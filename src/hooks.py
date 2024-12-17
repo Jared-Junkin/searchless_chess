@@ -1,5 +1,5 @@
 
-from typing import List, Dict, Any, Tuple, Callable
+from typing import List, Dict, Any, Tuple, Callable, Optional
 from abc import ABC, abstractmethod
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -123,18 +123,41 @@ def generate_best_move_hook(model: AutoModelForCausalLM,
                 
         return best_move
 
+'''
+    # optionally impose an element-wise F2 penalty if prevent weights shifting too far from initial distribution
+    if F2_penalty and F2_lambda is not None and initial_params is not None:
+        current_params = []
+        for (name, p) in model.named_parameters():
+            if p.requires_grad:
+                current
+'''
+
+def F2_loss_hook(model: AutoModelForCausalLM, 
+                 initial_params_flat: torch.Tensor, 
+                 F2_lambda: float,
+                 loss: float)->float:
+    current_params = []
+    for (name, p) in model.named_parameters():
+        if p.requires_grad:
+            current_params.append(p.view(-1))
+    current_params = torch.cat(current_params)
+    kl_loss = torch.nn.functional.mse_loss(current_params, initial_params_flat, reduction='sum')
+    loss = loss + F2_lambda * kl_loss
+    return loss
+    
+
 def forward_step_hook(seq: torch.Tensor,
                       loss_mask: torch.Tensor,
                       attn_mask: torch.Tensor,
                       model: AutoModelForCausalLM,
                       gradient_accumulation_steps: int,
                       method: str = "dont_attend_to_prev_answers"
-                      )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                      )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
     if method == "dont_attend_to_prev_answers":
         seq_tmp = seq.detach().clone()
         seq_tmp[loss_mask == 1] = 0  # Replace target tokens in the input with pad (0)
-    elif method == "attend_to_prev_ansewrs":
+    elif method == "attend_to_prev_answers":
         seq_tmp = seq # 
         # attn_mask = (seq_tmp > 1).long().to(seq.device) # if we're attending to previous answers, we should modify attention mask to do so. (really all this should be done in the dataloader, but I'm short on time.)
     else:
@@ -147,6 +170,7 @@ def forward_step_hook(seq: torch.Tensor,
     shifted_labels = seq[:, 1:].clone()      # The model at position i predicts seq[i+1]
     shifted_mask = loss_mask[:, 1:]          # Shift mask as well
     logits = logits[:, :-1, :]               # Align logits so they match shifted_labels
+    
 
     # Set non-target positions to -100
     shifted_labels[shifted_mask == 0] = -100
@@ -155,7 +179,20 @@ def forward_step_hook(seq: torch.Tensor,
     loss = loss_fn(logits.reshape(-1, logits.size(-1)), shifted_labels.view(-1))
     loss = loss / gradient_accumulation_steps
     
-    return loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask
+    # calculate the sequence accuracy.
+    pred = torch.argmax(logits, dim=-1)  # (batch_size, seq_len)
+    valid_positions = (shifted_labels != -100)
+    sequence_accuracy = ((pred == shifted_labels) | ~valid_positions).all(dim=1).float().mean()
+    
+    # calculate the mean probability of the actual best move
+    probs = torch.softmax(logits, dim=-1)
+    correct_probs = probs[valid_positions, shifted_labels[valid_positions]]
+    mean_correct_prob = correct_probs.mean()
+    
+    # calculate the mean probability of the chosen move
+    chosen_probs = probs[valid_positions, pred[valid_positions]]
+    mean_chosen_prob = chosen_probs.mean()
+    return loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob
 
 
 def log_batch_details_hook(outputs: torch.Tensor,
@@ -172,6 +209,12 @@ def log_batch_details_hook(outputs: torch.Tensor,
                            )->None:
 
     attention_weights = outputs.attentions  # List of attention tensors
+    padding_mask = (attn_mask == False).unsqueeze(1).unsqueeze(2)
+    for layer_idx, layer_attention in enumerate(attention_weights): # this will verify that 0 attention is being given to padding tokens. 
+        padding_attention = layer_attention * padding_mask
+        sum_padding_attention = padding_attention.sum()
+        logger.info(f"Layer {layer_idx}: Padding attention sum: {sum_padding_attention}")
+    
     attended_tokens = torch.argmax(attention_weights[0][0, 0], dim=-1)
 
     # We have already computed:
