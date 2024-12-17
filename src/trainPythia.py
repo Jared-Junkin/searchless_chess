@@ -1,6 +1,7 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedTokenizer, BitsAndBytesConfig
 from torch.distributed import barrier, init_process_group, destroy_process_group
 import torch.distributed as dist
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 import torch
 from torch.utils.data import DataLoader
 import math
@@ -23,75 +24,6 @@ from yaml import CLoader as Loader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import traceback
-
-### Jared Imports
-from typing import Optional
-def run_with_error_handling(
-    func: Callable[..., None], 
-    *args: Any, 
-    log_path: Optional[str]="/workspace/searchless_chess/src/pythia/logs/errors.log",
-    **kwargs: Any
-) -> None:
-    """
-    Runs a function and logs any errors before exiting.
-    
-    Args:
-        func (Callable[..., None]): The function to run.
-        *args (Any): Positional arguments to pass to the function.
-        **kwargs (Any): Keyword arguments to pass to the function.
-        log_path: (Optional[str]): full path to the logfile (doesn't need to exist already) where error messages will get logged.
-    """
-    logger_errors = setupLogger(config={"log_path": log_path}) # file doesn't need to exist already.
-    try:
-        func(*args, **kwargs)
-    except Exception as e:
-        # Capture the full traceback as a formatted string
-        full_traceback = traceback.format_exc()
-        logger_errors.error(f"{str(e)}\n{full_traceback}\n")
-
-        # Print for debugging
-        print(f"{str(e)}\n{full_traceback}")
-        
-        exit(1)
-
-def setupLogger(config: dict, logger_name: str = "jaredLogger", log_level: str = "DEBUG") -> logging.Logger:
-    """
-    Sets up and returns a logger with a specified log file, logger name, and log level.
-
-    Args:
-        log_file (str): The path to the log file where logs will be written.
-        logger_name (str): The name of the logger. Default is "jaredLogger".
-        log_level (str): The logging level (e.g., "DEBUG", "INFO"). Default is "DEBUG".
-
-    Returns:
-        logging.Logger: Configured logger instance.
-    """
-    # Ensure the directory for the log file exists
-    log_file = config["log_path"]
-    print(f"setting up logfile from {log_file}")
-    
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
-
-    # Create or get the logger instance
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(log_level)
-
-    # Prevent duplicate handlers if function is called multiple times
-    if not logger.handlers:
-        # Create a file handler
-        file_log = logging.FileHandler(log_file)
-
-        # Define the log format
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        file_log.setFormatter(formatter)
-
-        # Add the handler to the logger
-        logger.addHandler(file_log)
-
-    return logger
-
-### End Jared Imports
-
 
 
 
@@ -194,25 +126,6 @@ def test_data_loader(loader: LlamaLoader, iters: int)->None:
         _, _, _,_,_ = next(loader)
     print(F"all loads repeated successfully")
     
-# def load_dataloader(config: dict, tokenizer: PreTrainedTokenizer, split: str) -> DataLoader:
-#     # set up config used to create dataloader
-#     world_size = config["ddp_world_size"]
-#     local_rank = config["ddp_local_rank"]
-#     train_data = LanguageDataConfig(
-#         batch_size= config["batch_size"],
-#         tokenizer=tokenizer,
-#         tokenizer_save_path=config["out_dir"],
-#         shuffle=config["shuffle"],
-#         worker_count=config["worker_count"],  # 0 disables multiprocessing.
-#         num_return_buckets=config["num_return_buckets"],
-#         policy=config["policy"],
-#         split=split,
-#     )
-#     # build and return dataloader
-#     print(f"building data loader with world size = {world_size} and local rank = {local_rank}")
-#     data_iter = build_data_loader_language(config=train_data, world_size=world_size, rank=local_rank)
-#     return data_iter
-
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it:int, config: dict)->float:
     # 1) linear warmup for warmup_iters steps
@@ -228,52 +141,6 @@ def get_lr(it:int, config: dict)->float:
     return config['min_lr'] + coeff * (config['learning_rate'] - config['min_lr'])
         
 
-def set_ddp_params(config: dict) -> Tuple[dict, str, int]:
-    """
-    Sets up Distributed Data Parallel (DDP) parameters.
-
-    Args:
-        config (dict): Configuration dictionary with at least a 'device' and 'backend' key.
-
-    Returns:
-        Tuple[dict, str, int]: Updated config, the device string, and whether DDP is active (1 for True, 0 for False).
-    """
-    # Determine if this is a DDP run
-    ddp = int(os.environ.get('RANK', -1)) != -1  # Is this a DDP run?
-
-    if ddp:
-        # Initialize process group for DDP
-        init_process_group(backend=config['backend'])
-
-        # Fetch environment variables
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
-
-        # Set DDP-specific config parameters
-        config["ddp_world_size"] = ddp_world_size
-        config["ddp_local_rank"] = ddp_local_rank
-        config["ddp_rank"] = ddp_rank
-
-        # Set the device based on local rank
-        device = f'cuda:{ddp_local_rank}'
-        torch.cuda.set_device(device)
-
-        master_process = ddp_rank == 0 
-        print(f"Using Multiprocessing: ddp world size is {ddp_world_size}, local rank is {ddp_local_rank}. Master Process: {master_process}")
-    else:
-        # Single GPU or CPU setup
-        device = config['device']
-        config["ddp_world_size"] = 0
-        config["ddp_local_rank"] = 0
-        config["ddp_rank"] = 0
-        master_process = True
-        ddp_local_rank=0
-
-        print(f"Setting up on device {device}")
-
-    return config, device, ddp, ddp_local_rank, master_process
-
 def training(config: dict) -> None:
     # set variables
     logger = setupLogger(config=config)
@@ -288,14 +155,42 @@ def training(config: dict) -> None:
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
     scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
     # load model, tokenizer, dataloader
-    # this tokenizer won't match exactly to begin with in terms of size because it is GPT4NeoXTokenizer and I'm using a pythia model. similar size of vocab size but not identical, because there are certain reserved tokens the model doesn't care about.
-    model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
+    # this tokenizer won't match exactly to begin with in terms of size because it is GPT4NeoXTokenizer and I'm using a pythia model. similar size of vocab size but not identical, because there are certain reserved tokens the model doesn't care about
     tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"])
     
     
-    
+    if "LORA" in config and config["LORA"]==True:
+        # QLORA (quantization parameters)
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16  # or torch.float16 depending on your hardware
+        )
+        # quantize model weights to 4 bits precision to save memory.
+        model = AutoModelForCausalLM.from_pretrained(
+            config["model_load_dir"],
+            quantization_config=bnb_config,
+        )
+        model = prepare_model_for_kbit_training(model) # this will ensure gradients continue to flow through our quantized model.
+        target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc_in", "fc_out"]
+        lora_config = LoraConfig(
+            r=8,  # Low rank dimension
+            lora_alpha=16,
+            target_modules=target_modules,
+            lora_dropout=0.1,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_config)     # Inject LoRA adapters
+    else:
+        model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"], device_map='auto', torch_dtype=torch.bfloat16)
+    model.gradient_checkpointing_enable()
+    model.train()
+        
+    num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters: {num_trainable_params:,}")
 
-    
     
     # decrease context length of model.
     # current_positional_embeddings = model.model.get_input_embeddings().weight
@@ -309,7 +204,7 @@ def training(config: dict) -> None:
         
     ## create dataloader
     train_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="train")
-    model.resize_token_embeddings(len(tokenizer)) # must resize the length of the modelstoken embeddings because we've added tokens to the tokenizer
+    # model.resize_token_embeddings(len(tokenizer)) # must resize the length of the modelstoken embeddings because we've added tokens to the tokenizer
     ## create optimizer 
     optimizer = create_optimizer(model, config)
         ## store initial params for F2 regularization penalty
@@ -441,6 +336,7 @@ def training(config: dict) -> None:
             attn_mask = attn_mask.to(device)
             # Only apply F2 penalty on the final micro-step before backpropagating the full batch loss
             if micro_step == gradient_accumulation_steps - 1 and config["F2_regularization"]:
+                print(f"doing f2 regularization")
                 loss = F2_loss_hook(
                     model=model,
                     F2_lambda=config["f2_lambda"],
@@ -532,7 +428,8 @@ def training(config: dict) -> None:
                 mfu = 0 # TODO: replace with mfu function later.
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
             if master_process:
-                logger.info(f"iter {iter_num}: loss {loss_value:.4f}, time {(dt/gradient_accumulation_steps)*1000:.2f}ms, seq_acc: {acc*100:.2f}%, gt. conf: {avg_correct_prob/gradient_accumulation_steps:.4f}, ans. conf: {avg_chosen_prob/gradient_accumulation_steps:.4f} diff: {(avg_chosen_prob/gradient_accumulation_steps - avg_correct_prob/gradient_accumulation_steps):.4f}")
+                # changed the probs in here because I'm using log-softmax now for memory reasons.
+                logger.info(f"iter {iter_num}: loss {loss_value:.4f}, time {(dt/gradient_accumulation_steps)*1000:.2f}ms, seq_acc: {acc*100:.2f}%, gt. conf: {math.exp(avg_correct_prob/gradient_accumulation_steps):.4f}, ans. conf: {math.exp(avg_chosen_prob/gradient_accumulation_steps):.4f} diff: {(math.exp(avg_chosen_prob/gradient_accumulation_steps) - math.exp(avg_correct_prob/gradient_accumulation_steps)):.4f}")
                 if config["wandb_log"]:
                     print(f"logging wandb outside loop")
                     # wandb.log({"val_loss": best_val_loss, "train_loss": loss_value})
@@ -613,13 +510,13 @@ def sweep_hyperparameters(config: dict, sweep_runs: int = 30) -> None:
     
 if __name__ == "__main__":
 
-    config_file = "/workspace/searchless_chess/src/config_pthia_hypsweep.yaml"  # config file for wandb hyperparameter sweep
+    # config_file = "/workspace/searchless_chess/src/config_pthia_hypsweep.yaml"  # config file for wandb hyperparameter sweep
     # config_file = "/workspace/searchless_chess/src/config_pythia.yaml"        # config for pythia training from scratch
-    # config_file = "/workspace/searchless_chess/src/config_llama.yaml"         # config for llama training from scratch
+    config_file = "/workspace/searchless_chess/src/config_llama.yaml"         # config for llama training from scratch
 
     with open(config_file, "r") as stream:
         config = yaml.load(stream=stream, Loader=Loader)
 
-    # run_with_error_handling(training, config=config, log_path=config["log_path"])
-    run_with_error_handling(sweep_hyperparameters, config=config, log_path=config["log_path"])
+    run_with_error_handling(training, config=config, log_path=config["log_path"])
+    # run_with_error_handling(sweep_hyperparameters, config=config, log_path=config["log_path"])
     

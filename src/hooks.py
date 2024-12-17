@@ -4,11 +4,123 @@ from abc import ABC, abstractmethod
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
+from torch.distributed import init_process_group
 # abstract hook class
 import numpy as np
 import wandb
 import seaborn as sns
 import matplotlib.pyplot as plt
+import traceback
+import os
+def setupLogger(config: dict, logger_name: str = "jaredLogger", log_level: str = "DEBUG") -> logging.Logger:
+    """
+    Sets up and returns a logger with a specified log file, logger name, and log level.
+
+    Args:
+        log_file (str): The path to the log file where logs will be written.
+        logger_name (str): The name of the logger. Default is "jaredLogger".
+        log_level (str): The logging level (e.g., "DEBUG", "INFO"). Default is "DEBUG".
+
+    Returns:
+        logging.Logger: Configured logger instance.
+    """
+    # Ensure the directory for the log file exists
+    log_file = config["log_path"]
+    print(f"setting up logfile from {log_file}")
+    
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+    # Create or get the logger instance
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(log_level)
+
+    # Prevent duplicate handlers if function is called multiple times
+    if not logger.handlers:
+        # Create a file handler
+        file_log = logging.FileHandler(log_file)
+
+        # Define the log format
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        file_log.setFormatter(formatter)
+
+        # Add the handler to the logger
+        logger.addHandler(file_log)
+
+    return logger
+
+def run_with_error_handling(
+    func: Callable[..., None], 
+    *args: Any, 
+    log_path: Optional[str]="/workspace/searchless_chess/src/pythia/logs/errors.log",
+    **kwargs: Any
+) -> None:
+    """
+    Runs a function and logs any errors before exiting.
+    
+    Args:
+        func (Callable[..., None]): The function to run.
+        *args (Any): Positional arguments to pass to the function.
+        **kwargs (Any): Keyword arguments to pass to the function.
+        log_path: (Optional[str]): full path to the logfile (doesn't need to exist already) where error messages will get logged.
+    """
+    logger_errors = setupLogger(config={"log_path": log_path}) # file doesn't need to exist already.
+    try:
+        func(*args, **kwargs)
+    except Exception as e:
+        # Capture the full traceback as a formatted string
+        full_traceback = traceback.format_exc()
+        logger_errors.error(f"{str(e)}\n{full_traceback}\n")
+
+        # Print for debugging
+        print(f"{str(e)}\n{full_traceback}")
+        
+        exit(1)
+
+def set_ddp_params(config: dict) -> Tuple[dict, str, int]:
+    """
+    Sets up Distributed Data Parallel (DDP) parameters.
+
+    Args:
+        config (dict): Configuration dictionary with at least a 'device' and 'backend' key.
+
+    Returns:
+        Tuple[dict, str, int]: Updated config, the device string, and whether DDP is active (1 for True, 0 for False).
+    """
+    # Determine if this is a DDP run
+    ddp = int(os.environ.get('RANK', -1)) != -1  # Is this a DDP run?
+
+    if ddp:
+        # Initialize process group for DDP
+        init_process_group(backend=config['backend'])
+
+        # Fetch environment variables
+        ddp_rank = int(os.environ['RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+
+        # Set DDP-specific config parameters
+        config["ddp_world_size"] = ddp_world_size
+        config["ddp_local_rank"] = ddp_local_rank
+        config["ddp_rank"] = ddp_rank
+
+        # Set the device based on local rank
+        device = f'cuda:{ddp_local_rank}'
+        torch.cuda.set_device(device)
+
+        master_process = ddp_rank == 0 
+        print(f"Using Multiprocessing: ddp world size is {ddp_world_size}, local rank is {ddp_local_rank}. Master Process: {master_process}")
+    else:
+        # Single GPU or CPU setup
+        device = config['device']
+        config["ddp_world_size"] = 0
+        config["ddp_local_rank"] = 0
+        config["ddp_rank"] = 0
+        master_process = True
+        ddp_local_rank=0
+
+        print(f"Setting up on device {device}")
+
+    return config, device, ddp, ddp_local_rank, master_process
 
 class HookManager:
     def __init__(self)->None:
@@ -151,7 +263,8 @@ def forward_step_hook(seq: torch.Tensor,
                       attn_mask: torch.Tensor,
                       model: AutoModelForCausalLM,
                       gradient_accumulation_steps: int,
-                      method: str = "dont_attend_to_prev_answers"
+                      method: str = "dont_attend_to_prev_answers",
+                      attentions: bool = True
                       )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
     if method == "dont_attend_to_prev_answers":
@@ -163,7 +276,7 @@ def forward_step_hook(seq: torch.Tensor,
     else:
         raise NotImplementedError(f"Method {method} is not a valid input. See hooks.py ~ forward_step_hook for details.")
 
-    outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=True)
+    outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=False)
     logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 
     # Shift labels by one
@@ -185,7 +298,7 @@ def forward_step_hook(seq: torch.Tensor,
     sequence_accuracy = ((pred == shifted_labels) | ~valid_positions).all(dim=1).float().mean()
     
     # calculate the mean probability of the actual best move
-    probs = torch.softmax(logits, dim=-1)
+    probs = torch.log_softmax(logits, dim=-1) # more memory efficient than softmax
     correct_probs = probs[valid_positions, shifted_labels[valid_positions]]
     mean_correct_prob = correct_probs.mean()
     
@@ -207,15 +320,15 @@ def log_batch_details_hook(outputs: torch.Tensor,
                            attn_mask: torch.Tensor,
                            seq_tmp: torch.Tensor,
                            )->None:
-
-    attention_weights = outputs.attentions  # List of attention tensors
-    padding_mask = (attn_mask == False).unsqueeze(1).unsqueeze(2)
-    for layer_idx, layer_attention in enumerate(attention_weights): # this will verify that 0 attention is being given to padding tokens. 
-        padding_attention = layer_attention * padding_mask
-        sum_padding_attention = padding_attention.sum()
-        logger.info(f"Layer {layer_idx}: Padding attention sum: {sum_padding_attention}")
+    ## temporarily removing attended tokens from this because it is extremely memory inefficient.
+    # attention_weights = outputs.attentions  # List of attention tensors
+    # padding_mask = (attn_mask == False).unsqueeze(1).unsqueeze(2)
+    # for layer_idx, layer_attention in enumerate(attention_weights): # this will verify that 0 attention is being given to padding tokens. 
+    #     padding_attention = layer_attention * padding_mask
+    #     sum_padding_attention = padding_attention.sum()
+    #     logger.info(f"Layer {layer_idx}: Padding attention sum: {sum_padding_attention}")
     
-    attended_tokens = torch.argmax(attention_weights[0][0, 0], dim=-1)
+    # attended_tokens = torch.argmax(attention_weights[0][0, 0], dim=-1)
 
     # We have already computed:
     # shifted_labels = seq[:, 1:].clone()
@@ -283,7 +396,7 @@ def log_batch_details_hook(outputs: torch.Tensor,
         config=config,
         tokenizer=tokenizer,
         logger=logger,
-        attended_tokens=attended_tokens,
+        attended_tokens=[],
         attn_mask=attn_mask,
         seq=seq_tmp[0]  # seq_tmp is the input to the model (prompt+pad), for logging
     )

@@ -286,6 +286,7 @@ class LlamaLoader:
                                     tokenizer_save_path=config.tokenizer_save_path,
                                     data_source=data_source,
                                     pad_token=training_config["pad_token"],
+                                    eot_token=training_config["eot_token"],
                                     prompt_components=None
                                     )
         if world_size > 1:
