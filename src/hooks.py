@@ -275,7 +275,6 @@ def forward_step_hook(seq: torch.Tensor,
         # attn_mask = (seq_tmp > 1).long().to(seq.device) # if we're attending to previous answers, we should modify attention mask to do so. (really all this should be done in the dataloader, but I'm short on time.)
     else:
         raise NotImplementedError(f"Method {method} is not a valid input. See hooks.py ~ forward_step_hook for details.")
-
     outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=False)
     logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 

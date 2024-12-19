@@ -1,4 +1,6 @@
 ---
+
+
 model_load_dir: "./Llama/llama_3_1B"
 tokenizer_load_dir: "./Llama/llama_3_1B"
 policy: "language"
@@ -48,4 +50,6 @@ device_type: 'cuda'
 device: 'cuda'                             # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype: 'bfloat16'                          # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile: True                              # use PyTorch 2.0 to compile the model to be faster (jared is temporarily setting to false for debugging purposes.)
-description: "Attempting to shard model across both GPUs"
+description: "Trying out LoRA on Llama1.3B. Attempting to shard model across both GPUs"
+ddp_world_size: 0
+ddp_local_rank: 0 

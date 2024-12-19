@@ -1,29 +1,25 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedTokenizer, BitsAndBytesConfig
-from torch.distributed import barrier, init_process_group, destroy_process_group
-import torch.distributed as dist
-from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from accelerate import Accelerator
 import torch
 from torch.utils.data import DataLoader
 import math
+from torch.distributed.fsdp.fully_sharded_data_parallel import FullOptimStateDictConfig, FullStateDictConfig
+from accelerate import FullyShardedDataParallelPlugin
 import wandb
-from language_data_loader import LlamaLoader
-from config_language import LanguageDataConfig
-from test import decode
+# from language_data_loader import LlamaLoader, build_data_loader
+from language_data_loader import build_data_loader
 from torch.optim import Adam
 from contextlib import nullcontext
 import yaml
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DistributedSampler
 import time
-import logging
-from typing import Tuple, Callable, Any
 import os
 from hooks import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false" # disabling Autotokenizer parallelism so we can do distributed training.
 from yaml import CLoader as Loader
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.distributed as dist
-import traceback
+import os
+from torch.optim import Adam
+
 
 
 
@@ -37,9 +33,9 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
         for k in range(eval_iters):
             seq, attn_mask, loss_mask, _, _ = next(loader)
             
-            seq = seq.to(model.device)
-            attn_mask = attn_mask.to(model.device)
-            loss_mask=loss_mask.to(model.device)
+            # seq = seq.to(model.device)
+            # attn_mask = attn_mask.to(model.device)
+            # loss_mask=loss_mask.to(model.device)
 
             with ctx if ctx else torch.no_grad():  # Use ctx if provided, else default no_grad context
                 outputs = model(**{"input_ids": seq, "attention_mask": attn_mask}) 
@@ -81,28 +77,11 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
     model.train()  # Set model back to training mode
     ### temporary code in here as a sanity check.
     return out
-
-import os
-import torch
-from torch.optim import Adam
-
 def create_optimizer(model, config: dict) -> Adam:
     # Extract optimizer configuration
     weight_decay = config['weight_decay']
     learning_rate = config['learning_rate']
     betas = (config['beta1'], config['beta2'])
-    device = config["device"]  # e.g. 'cuda:1' or 'cpu'
-
-    # Check if we are in DDP mode
-    ddp_mode = 'LOCAL_RANK' in os.environ
-
-    if ddp_mode:
-        # If in DDP mode, we rely on local rank for setting device
-        local_rank = int(os.environ['LOCAL_RANK'])
-        torch.cuda.set_device(local_rank)
-        device = f'cuda:{local_rank}'
-    # Move model to the specified device
-    model = model.to(device)
 
     # Create optimizer
     optimizer = Adam(
@@ -116,16 +95,6 @@ def create_optimizer(model, config: dict) -> Adam:
 
 
 
-        
-# test_data_loader(loader=test_iter, iters=max_iters)
-# this just iterates repeatedly through the loader iters times. Confirming it won't error out.
-def test_data_loader(loader: LlamaLoader, iters: int)->None:
-    print(f"type loader is {type(loader)}, len loader is: {len(loader)}")
-    for i in range(iters):
-        print(f"loading batch {i}")
-        _, _, _,_,_ = next(loader)
-    print(F"all loads repeated successfully")
-    
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it:int, config: dict)->float:
     # 1) linear warmup for warmup_iters steps
@@ -141,7 +110,97 @@ def get_lr(it:int, config: dict)->float:
     return config['min_lr'] + coeff * (config['learning_rate'] - config['min_lr'])
         
 
+import torch
+import torch.distributed as dist
+from accelerate import Accelerator
+
+def setup_distributed():
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(int(torch.cuda.current_device()))
+    print(f"Initialized rank {dist.get_rank()} on {torch.cuda.current_device()}")
+
+
+# you're going to have to get a minimum example with boilerplate builtin code working in another. then you can plug your stuff in bit by bit and get it to run.
+def training_simple(config: dict)-> None:
+    # assign variables for different things needed in the training process.
+    learning_rate = config["learning_rate"]
+    decay_lr = config["decay_lr"]
+    
+    logger = setupLogger(config=config)
+    for key, value in config.items():
+        logger.info(f"{key}: {value}\n")
+    
+    tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"])
+    model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
+    optimizer = create_optimizer(model, config)
+    # set up scaler for mixed precision training
+    ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}['bfloat16']
+    ctx = nullcontext() if config['device_type'] == 'cpu' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
+    dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+
+    # build dataloaders
+    train_iter = build_data_loader(training_config=config, tokenizer=tokenizer, split="train")
+    test_iter = build_data_loader(training_config=config, tokenizer=tokenizer, split="test")
+    
+    # set up accelerator
+    fsdp_plugin = FullyShardedDataParallelPlugin(
+    state_dict_config=FullStateDictConfig(offload_to_cpu=False, rank0_only=False),
+    optim_state_dict_config=FullOptimStateDictConfig(offload_to_cpu=False, rank0_only=False),
+)
+    accelerator = Accelerator(
+        gradient_accumulation_steps=config["gradient_accumulation_steps"],
+        mixed_precision='fp16',
+        fsdp_plugin=fsdp_plugin)
+
+    model, optimizer, train_iter, test_iter = accelerator.prepare(
+        model, optimizer, train_iter, test_iter
+    )
+    iter_num = 0
+    for seq, attn_mask in train_iter:
+
+        # Set learning rate for the current iteration
+        if decay_lr:
+            lr = get_lr(iter_num, config)
+        else:
+            lr = learning_rate
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        # with accelerator.accumulate():
+        with accelerator.autocast():
+
+                loss_mask = attn_mask & (torch.arange(attn_mask.size(1), device=attn_mask.device).unsqueeze(0) >= (attn_mask.sum(dim=1, keepdim=True) - 6)) # hacky. hardcoding to the last 6 digits because huggingface is stupid and is forcing me to only return two
+
+                outputs = model(input_ids=seq, output_attentions=False)
+                logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+
+
+                # Shift labels by one
+                shifted_labels = seq[:, 1:].clone()      # The model at position i predicts seq[i+1]
+                shifted_mask = loss_mask[:, 1:]          # Shift mask as well
+                logits = logits[:, :-1, :]               # Align logits so they match shifted_labels
+                
+
+                # Set non-target positions to -100
+                shifted_labels[shifted_mask == 0] = -100
+
+                # calculate loss
+                loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                loss = loss_fn(logits.reshape(-1, logits.size(-1)), shifted_labels.view(-1))
+                logger.info(accelerator.sync_gradients)
+                # loss = accelerator.reduce(loss, reduction="mean")
+                rank = accelerator.process_index  # Rank of this process
+                logger.info(f"iter {iter_num}, rank {rank}, loss: {loss}")
+                # loss = accelerator.reduce(loss, reduction="mean")
+                accelerator.wait_for_everyone()
+                accelerator.backward(loss)
+                optimizer.step()
+                optimizer.zero_grad()
+            
+        iter_num += 1
+    
 def training(config: dict) -> None:
+    
     # set variables
     logger = setupLogger(config=config)
     for key, value in config.items():
@@ -155,55 +214,16 @@ def training(config: dict) -> None:
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
     scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
     # load model, tokenizer, dataloader
-    # this tokenizer won't match exactly to begin with in terms of size because it is GPT4NeoXTokenizer and I'm using a pythia model. similar size of vocab size but not identical, because there are certain reserved tokens the model doesn't care about
     tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"])
-    
-    
-    if "LORA" in config and config["LORA"]==True:
-        # QLORA (quantization parameters)
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16  # or torch.float16 depending on your hardware
-        )
-        # quantize model weights to 4 bits precision to save memory.
-        model = AutoModelForCausalLM.from_pretrained(
-            config["model_load_dir"],
-            quantization_config=bnb_config,
-        )
-        model = prepare_model_for_kbit_training(model) # this will ensure gradients continue to flow through our quantized model.
-        target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc_in", "fc_out"]
-        lora_config = LoraConfig(
-            r=8,  # Low rank dimension
-            lora_alpha=16,
-            target_modules=target_modules,
-            lora_dropout=0.1,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, lora_config)     # Inject LoRA adapters
-    else:
-        model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"], device_map='auto', torch_dtype=torch.bfloat16)
-    model.gradient_checkpointing_enable()
-    model.train()
-        
-    num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Number of trainable parameters: {num_trainable_params:,}")
-
-    
-    # decrease context length of model.
-    # current_positional_embeddings = model.model.get_input_embeddings().weight
-    # new_positinal_embeddings = current_positional_embeddings[:config["max_context_length"]].clone()
-    # model.model.embed_tokens = torch.nn.Embedding(num_embeddings=config["max_context_length"], embedding_dim=model.config.hidden_size) # num embeddings = context length, embedding_dim = embedding dimension
-    # model.model.embed_tokens.weight.data = new_positinal_embeddings
-    
-    config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
+    model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
     
 
         
     ## create dataloader
-    train_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="train")
+    # not using ddp anymore.
+    config["ddp_world_size"]=0
+    config["ddp_local_rank"]=0
+    train_iter = build_data_loader(training_config=config, tokenizer=tokenizer, split="train")
     # model.resize_token_embeddings(len(tokenizer)) # must resize the length of the modelstoken embeddings because we've added tokens to the tokenizer
     ## create optimizer 
     optimizer = create_optimizer(model, config)
@@ -216,11 +236,7 @@ def training(config: dict) -> None:
                     initial_params.append(p.view(-1))
             initial_params_flat = torch.cat(initial_params) 
     print(optimizer)
-    
-    if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
 
-    print(f"successfully wrapped model with DDP object for parallel processing")
 
     # seq, attn_mask, loss_mask = next(data_iter)
     # print(f"seq is {seq}")
@@ -239,18 +255,28 @@ def training(config: dict) -> None:
     eval_interval = config["eval_interval"]
     always_save_checkpoint = config["always_save_checkpoint"]
     
-    test_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="test")
-    ## unit tests to make sure the dataloaders can repeat over dataset and not raise stopIteration errors
-    # test_data_loader(loader=test_iter, iters=10*len(test_iter))
-    # print(f"made it through test loader")
-    # test_data_loader(loader=train_iter, iters=max_iters)
+    test_iter = build_data_loader(training_config=config, tokenizer=tokenizer, split="test")
+    
+    
+    
+    
+    accelerator = Accelerator()
+    print(f"preparing to accelerate")
+    model, optimizer, train_iter, test_iter = accelerator.prepare(
+        model, optimizer, train_iter, test_iter
+    )
+    
+    
     gradient_accumulation_steps = config["gradient_accumulation_steps"]
-    seq, attn_mask, loss_mask,fen,_ = next(train_iter)
-    seq = seq.to(device)
-    attn_mask = attn_mask.to(device)
-    loss_mask=loss_mask.to(device)
-    logger.info(f"Starting Train loop. Batch size: {config['batch_size']}, learning rate: {learning_rate}, gradient steps: {gradient_accumulation_steps}, weight_decay: {decay_lr}, ddp_local_rank: {ddp_local_rank}")
-    while iter_num < max_iters:
+    # seq = seq.to(device)
+    # attn_mask = attn_mask.to(device)
+    # loss_mask=loss_mask.to(device)
+    logger.info(f"Starting Train loop. Batch size: {config['batch_size']}, learning rate: {learning_rate}, gradient steps: {gradient_accumulation_steps}, weight_decay: {decay_lr}")
+    
+    # while iter_num < max_iters:
+    for seq, attn_mask, loss_mask in train_iter:
+        if iter_num >= max_iters:
+            break
         print(f"beginning iteration {iter_num}")
         # Set learning rate for the current iteration
         if decay_lr:
@@ -261,24 +287,21 @@ def training(config: dict) -> None:
             param_group['lr'] = lr
 
         # Evaluation and logging every eval_interval steps
-        if iter_num % eval_interval == 0 and master_process:
+        if iter_num % eval_interval == 0:
             losses = estimate_loss(model=model, eval_iters = config['eval_iters'], train_loader=train_iter, test_loader=test_iter, tokenizer=tokenizer, logger=logger, iter_num=iter_num, ctx=ctx)  # Placeholder for evaluation function
             train_loss, val_loss = losses['train'], losses['val']
-            print(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}, master_process: {master_process}")
+            print(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
            
             
             if logger:
-                logger.info(f"iter: {iter_num}, train/loss: {train_loss}, val/loss: {val_loss}, lr: {lr}, mfu: {running_mfu * 100}, master_process: {master_process}, seq: {seq.shape}, loss_mask: {loss_mask.shape}, attn_mask: {attn_mask.shape}")
+                logger.info(f"iter: {iter_num}, train/loss: {train_loss}, val/loss: {val_loss}, lr: {lr}, mfu: {running_mfu * 100}, seq: {seq.shape}, loss_mask: {loss_mask.shape}, attn_mask: {attn_mask.shape}")
         
             # Checkpoint saving
             if val_loss < best_val_loss or always_save_checkpoint:
                 best_val_loss = val_loss
                 checkpoint_dir = os.path.join(out_dir, f"ckpt{iter_num}")
-                # save model
-                if ddp:
-                    model.module.save_pretrained(checkpoint_dir)
-                else:
-                    model.save_pretrained(checkpoint_dir)
+
+                model.save_pretrained(checkpoint_dir)
                 # save tokenizer
                 tokenizer.save_pretrained(checkpoint_dir)
                 # save optimizer
@@ -296,9 +319,9 @@ def training(config: dict) -> None:
         avg_correct_prob = 0
         avg_chosen_prob = 0
         for micro_step in range(gradient_accumulation_steps):
-            if ddp:
-                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
             with ctx:
+                
+                
                 loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = forward_step_hook(seq=seq,
                                                                                loss_mask=loss_mask,
                                                                                attn_mask=attn_mask,
@@ -310,8 +333,8 @@ def training(config: dict) -> None:
                 avg_correct_prob += mean_correct_prob
                 avg_chosen_prob += mean_chosen_prob
                 loss_avg += loss
-                if iter_num % eval_interval == 0 and master_process and micro_step==0: # making it so only one micro step can log
-                    logger.info(f"master proces: {master_process}, iter num: {iter_num}, micro batch: {micro_step}")
+                if iter_num % eval_interval == 0 and micro_step==0: # making it so only one micro step can log
+                    logger.info(f"iter num: {iter_num}, micro batch: {micro_step}")
                     with torch.no_grad():
                         # log_batch_details_hook
                         log_batch_details_hook(
@@ -330,10 +353,9 @@ def training(config: dict) -> None:
                        
 
 
-            seq, attn_mask, loss_mask,_,_ = next(train_iter)
-            seq = seq.to(device)
-            loss_mask = loss_mask.to(device)
-            attn_mask = attn_mask.to(device)
+            # seq = seq.to(device)
+            # loss_mask = loss_mask.to(device)
+            # attn_mask = attn_mask.to(device)
             # Only apply F2 penalty on the final micro-step before backpropagating the full batch loss
             if micro_step == gradient_accumulation_steps - 1 and config["F2_regularization"]:
                 print(f"doing f2 regularization")
@@ -427,26 +449,19 @@ def training(config: dict) -> None:
             if local_iter_num >= 5: # let the training loop settle a bit
                 mfu = 0 # TODO: replace with mfu function later.
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-            if master_process:
-                # changed the probs in here because I'm using log-softmax now for memory reasons.
-                logger.info(f"iter {iter_num}: loss {loss_value:.4f}, time {(dt/gradient_accumulation_steps)*1000:.2f}ms, seq_acc: {acc*100:.2f}%, gt. conf: {math.exp(avg_correct_prob/gradient_accumulation_steps):.4f}, ans. conf: {math.exp(avg_chosen_prob/gradient_accumulation_steps):.4f} diff: {(math.exp(avg_chosen_prob/gradient_accumulation_steps) - math.exp(avg_correct_prob/gradient_accumulation_steps)):.4f}")
-                if config["wandb_log"]:
-                    print(f"logging wandb outside loop")
-                    # wandb.log({"val_loss": best_val_loss, "train_loss": loss_value})
-                    wandb.log({"train_loss": loss_value, "seq_acc": acc*100, "time": dt/gradient_accumulation_steps*1000, "gt. conf:": avg_correct_prob/gradient_accumulation_steps, "ans. confg": avg_chosen_prob/gradient_accumulation_steps, "diff": (avg_chosen_prob/gradient_accumulation_steps - avg_correct_prob/gradient_accumulation_steps)})
-                else:
-                    print(f"not using wandb outside loop")
+            # changed the probs in here because I'm using log-softmax now for memory reasons.
+            logger.info(f"iter {iter_num}: loss {loss_value:.4f}, time {(dt/gradient_accumulation_steps)*1000:.2f}ms, seq_acc: {acc*100:.2f}%, gt. conf: {math.exp(avg_correct_prob/gradient_accumulation_steps):.4f}, ans. conf: {math.exp(avg_chosen_prob/gradient_accumulation_steps):.4f} diff: {(math.exp(avg_chosen_prob/gradient_accumulation_steps) - math.exp(avg_correct_prob/gradient_accumulation_steps)):.4f}")
+            if "wandb_log" in config and config["wandb_log"]:
+                print(f"logging wandb outside loop")
+                # wandb.log({"val_loss": best_val_loss, "train_loss": loss_value})
+                wandb.log({"train_loss": loss_value, "seq_acc": acc*100, "time": dt/gradient_accumulation_steps*1000, "gt. conf:": avg_correct_prob/gradient_accumulation_steps, "ans. confg": avg_chosen_prob/gradient_accumulation_steps, "diff": (avg_chosen_prob/gradient_accumulation_steps - avg_correct_prob/gradient_accumulation_steps)})
+            else:
+                print(f"not using wandb outside loop")
         iter_num += 1
         local_iter_num += 1
 
     print("Training complete.")
         
-    
-    # destroy subprocess at end
-    if ddp:
-        destroy_process_group()
-        
-
 
 def sweep_hyperparameters(config: dict, sweep_runs: int = 30) -> None:
     """
@@ -517,6 +532,6 @@ if __name__ == "__main__":
     with open(config_file, "r") as stream:
         config = yaml.load(stream=stream, Loader=Loader)
 
-    run_with_error_handling(training, config=config, log_path=config["log_path"])
+    run_with_error_handling(training_simple, config=config, log_path=config["log_path"])
     # run_with_error_handling(sweep_hyperparameters, config=config, log_path=config["log_path"])
     

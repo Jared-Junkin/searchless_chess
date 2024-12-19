@@ -241,8 +241,73 @@ class BagDataset(Dataset):
         sequence = torch.tensor(sequence, dtype=torch.long)
         attn = torch.tensor(attn, dtype=torch.bool)
         loss = torch.tensor(loss, dtype=torch.bool)
-        return sequence, attn, loss, fen, move
-    
+        return sequence, attn
+        # return sequence, attn, loss
+
+def build_data_loader(training_config: dict,
+                      tokenizer: PreTrainedTokenizer,
+                      split: str,
+                      data_dir: str = "/workspace/searchless_chess/data",
+                 data_source_name: str="behavioral_cloning_data.bag",
+                 )->DataLoader:
+    world_size = training_config["ddp_world_size"]
+    rank = training_config["ddp_local_rank"]
+    config = LanguageDataConfig(
+        batch_size= training_config["batch_size"],
+        tokenizer=tokenizer,
+        tokenizer_save_path=training_config["out_dir"],
+        shuffle=training_config["shuffle"],
+        worker_count=training_config["worker_count"],  # 0 disables multiprocessing.
+        num_return_buckets=training_config["num_return_buckets"],
+        policy=training_config["policy"],
+        split=split,
+    )
+    """Returns a data loader for chess from the config."""
+    data_source = bagz.BagDataSource(
+        os.path.join(
+            data_dir, config.split, data_source_name
+        )
+    )
+
+    if config.num_records is not None:
+        num_records = config.num_records
+        if len(data_source) < num_records:
+            raise ValueError(
+                f'[Process {jax.process_index()}]: The number of records requested'
+                f' ({num_records}) is larger than the dataset ({len(data_source)}).'
+            )
+    else:
+        num_records = len(data_source)
+
+    dataset: Dataset = BagDataset(tokenizer=config.tokenizer, 
+                                tokenizer_save_path=config.tokenizer_save_path,
+                                data_source=data_source,
+                                pad_token=training_config["pad_token"],
+                                eot_token=training_config["eot_token"],
+                                prompt_components=None
+                                )
+    if world_size > 1:
+        sampler: DistributedSampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=config.shuffle,
+        )
+    else:
+        sampler = RandomSampler(dataset) if config.shuffle else Sampler(dataset)
+        
+    return DataLoader(
+        dataset=dataset,
+        batch_size=config.batch_size,
+        sampler=sampler,
+        num_workers=config.worker_count,
+        pin_memory=True,
+        drop_last=True
+    )
+
+
+
+
 class LlamaLoader:
     
     def __init__(self, 
@@ -324,13 +389,13 @@ class LlamaLoader:
         return len(self._loader)
     def __next__(self)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         try:
-            seq, attn_mask, loss_mask, fen, move = next(self._loader_iter)
+            seq, attn_mask, loss_mask = next(self._loader_iter)
         except StopIteration:
             # TODO: log that you're starting over for loader_name 
             self._loader_iter = iter(self._loader)
-            seq, attn_mask, loss_mask, fen, move = next(self._loader_iter)
+            seq, attn_mask, loss_mask= next(self._loader_iter)
 
-        return seq, attn_mask, loss_mask, fen, move
+        return seq, attn_mask, loss_mask
 
             
 
