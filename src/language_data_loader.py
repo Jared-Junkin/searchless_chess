@@ -118,7 +118,7 @@ class BagDataset(Dataset):
             for char in move: 
                 encoding.append(self.encodings[char])
             self.all_move_encodings[move] = encoding
-        
+        print("hello")
 
 
         

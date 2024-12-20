@@ -257,6 +257,12 @@ def F2_loss_hook(model: AutoModelForCausalLM,
     loss = loss + F2_lambda * kl_loss
     return loss
     
+    
+# def forward_step_train(seq: torch.Tensor, loss_mask: torch.Tensor, model: AutoModelForCausalLM):
+#     seq_tmp = seq.detach().clone()
+#     seq_tmp[loss_mask == 1] = 1  # Replace target tokens in the input with pad (1)
+#     outputs = model(input_ids = seq_tmp)
+    
 
 def forward_step_hook(seq: torch.Tensor,
                       loss_mask: torch.Tensor,
@@ -269,13 +275,12 @@ def forward_step_hook(seq: torch.Tensor,
 
     if method == "dont_attend_to_prev_answers":
         seq_tmp = seq.detach().clone()
-        seq_tmp[loss_mask == 1] = 0  # Replace target tokens in the input with pad (0)
+        seq_tmp[loss_mask == 1] = 1  # Replace target tokens in the input with pad (0)
     elif method == "attend_to_prev_answers":
         seq_tmp = seq # 
         # attn_mask = (seq_tmp > 1).long().to(seq.device) # if we're attending to previous answers, we should modify attention mask to do so. (really all this should be done in the dataloader, but I'm short on time.)
     else:
         raise NotImplementedError(f"Method {method} is not a valid input. See hooks.py ~ forward_step_hook for details.")
-
     outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=False)
     logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 

@@ -1,6 +1,6 @@
 ---
-model_load_dir: "./pythia/pythia-160m"
-tokenizer_load_dir: "./pythia/pythia-160m"
+model_load_dir: "/workspace/searchless_chess/src/pythia/ckpts/ckpt88000"
+tokenizer_load_dir: "/workspace/searchless_chess/src/pythia/ckpts/ckpt88000"
 policy: "language"
 batch_size: 64                 # if gradient_accumulation_steps > 1, this is the micro-batch size
 num_return_buckets: 128                     # legacy from deepmind code. not used.
@@ -10,13 +10,13 @@ max_context_length: 1024                    # reduce memory overhead by limiting
 attn_method: "attend_to_prev_answers"
 pad_token: "<|padding|>"
 eot_token: "<|endoftext|>"
-out_dir: '/workspace/searchless_chess/src/pythia/ckpts/'
+out_dir: '/workspace/searchless_chess/src/pythia/ckpts_ft/'
 eval_interval: 1000
 log_interval: 10
 eval_iters: 0
 eval_only: False                          # if True, script exits right after the first eval
 always_save_checkpoint: True               # if True, always save a checkpoint after each eval
-log_path: "/workspace/searchless_chess/src/pythia/logs/train_21.log"
+log_path: "/workspace/searchless_chess/src/pythia/logs/train_23.log"
 F2_regularization: True
 f2_lambda: 0.00001 # penalty for f2 regularization
 # wandb logging
@@ -32,8 +32,8 @@ tens_log_dir: "/workspace/searchless_chess/logs/"
 gradient_accumulation_steps: 2             # used to simulate larger batch sizes
 
 # adamw optimizer
-learning_rate: 0.0003                      # max learning rate
-max_iters: 6000000                          # total number of training iterations
+learning_rate: 0.0002                     # max learning rate
+max_iters: 5000000                          # total number of training iterations
 weight_decay: 0
 beta1: 0.9
 beta2: 0.95
@@ -42,15 +42,15 @@ grad_clip: 1.0                             # clip gradients at this value, or di
 # learning rate decay settings
 decay_lr: True                             # whether to decay the learning rate
 warmup_iters: 0                       # how many steps to warm up for
-lr_decay_iters: 6000000                     # should be ~= max_iters per Chinchilla
-min_lr: 0.00006                            # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+lr_decay_iters: 5000000                     # should be ~= max_iters per Chinchilla
+min_lr: 0.000006                            # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 
 # DDP settings
 backend: 'nccl'                            # 'nccl', 'gloo', etc.
 
 # system
 device_type: 'cuda'
-device: 'cuda:1'                             # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device: 'cuda'                             # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype: 'bfloat16'                          # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile: True                              # use PyTorch 2.0 to compile the model to be faster (jared is temporarily setting to false for debugging purposes.)
-description: "Removed weight decay. Using tensorboard logging. Back to embedding original tokens. Small F2 score penalty. attn_mask masking out padding tokens. added"
+description: "Got model to output correct move 15% of the time. fine-tuning with no L2 penalty now and lower learning rate to see if I can build on first phase of training."

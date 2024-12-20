@@ -85,25 +85,21 @@ def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: Da
 import os
 import torch
 from torch.optim import Adam
-
-def create_optimizer(model, config: dict) -> Adam:
+# Ensure this runs within each DDP process
+def create_optimizer(model: AutoModelForCausalLM, config: dict) -> Adam:
     # Extract optimizer configuration
     weight_decay = config['weight_decay']
     learning_rate = config['learning_rate']
     betas = (config['beta1'], config['beta2'])
-    device = config["device"]  # e.g. 'cuda:1' or 'cpu'
-
-    # Check if we are in DDP mode
-    ddp_mode = 'LOCAL_RANK' in os.environ
-
-    if ddp_mode:
-        # If in DDP mode, we rely on local rank for setting device
-        local_rank = int(os.environ['LOCAL_RANK'])
-        torch.cuda.set_device(local_rank)
-        device = f'cuda:{local_rank}'
-    # Move model to the specified device
-    model = model.to(device)
-
+    device_type = config['device_type']  # GPU/CPU setup
+    
+    # Check device placement for parameters
+    if device_type == 'cuda':
+        # Ensure parameters are on the correct device
+        model = model.to(torch.cuda.current_device())
+    else:
+        model = model.to(device_type)
+    
     # Create optimizer
     optimizer = Adam(
         model.parameters(),
@@ -112,6 +108,9 @@ def create_optimizer(model, config: dict) -> Adam:
         weight_decay=weight_decay
     )
     return optimizer
+
+
+
 
 
 
@@ -183,9 +182,10 @@ def training(config: dict) -> None:
             task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, lora_config)     # Inject LoRA adapters
+        model.gradient_checkpointing_enable()
     else:
-        model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"], device_map='auto', torch_dtype=torch.bfloat16)
-    model.gradient_checkpointing_enable()
+        model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
+    # model.gradient_checkpointing_enable()
     model.train()
         
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -199,7 +199,7 @@ def training(config: dict) -> None:
     # model.model.embed_tokens.weight.data = new_positinal_embeddings
     
     config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
-    
+    model.to(device)
 
         
     ## create dataloader
@@ -512,7 +512,8 @@ if __name__ == "__main__":
 
     # config_file = "/workspace/searchless_chess/src/config_pthia_hypsweep.yaml"  # config file for wandb hyperparameter sweep
     # config_file = "/workspace/searchless_chess/src/config_pythia.yaml"        # config for pythia training from scratch
-    config_file = "/workspace/searchless_chess/src/config_llama.yaml"         # config for llama training from scratch
+    # config_file = "/workspace/searchless_chess/src/config_llama.yaml"         # config for llama training from scratch
+    config_file = "/workspace/searchless_chess/src/config_pythia_finetune.yaml"
 
     with open(config_file, "r") as stream:
         config = yaml.load(stream=stream, Loader=Loader)
