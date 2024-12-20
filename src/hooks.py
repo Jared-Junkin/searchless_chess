@@ -258,10 +258,12 @@ def F2_loss_hook(model: AutoModelForCausalLM,
     return loss
     
     
-# def forward_step_train(seq: torch.Tensor, loss_mask: torch.Tensor, model: AutoModelForCausalLM):
+# def forward_step_train(seq: torch.Tensor, loss_mask: torch.Tensor, model: AutoModelForCausalLM, attn_mask: torch.Tensor):
 #     seq_tmp = seq.detach().clone()
 #     seq_tmp[loss_mask == 1] = 1  # Replace target tokens in the input with pad (1)
-#     outputs = model(input_ids = seq_tmp)
+#     outputs = model(input_ids = seq_tmp, attention_mask=attn_mask)
+#     logits = outputs.logits
+    
     
 
 def forward_step_hook(seq: torch.Tensor,
@@ -281,6 +283,44 @@ def forward_step_hook(seq: torch.Tensor,
         # attn_mask = (seq_tmp > 1).long().to(seq.device) # if we're attending to previous answers, we should modify attention mask to do so. (really all this should be done in the dataloader, but I'm short on time.)
     else:
         raise NotImplementedError(f"Method {method} is not a valid input. See hooks.py ~ forward_step_hook for details.")
+    
+    ######### jared's sanity check:
+    # Step 1: Find the index of the 0th target token
+    target_indices = torch.where(loss_mask[0])[0]  # Indices of target tokens in the sequence
+    if target_indices.numel() == 0:
+        raise ValueError("No target tokens found in the sequence.")
+    first_target_index = target_indices[0].item()
+
+    # Step 2: Slice seq_tmp[0] and attn_mask[0] up to the 0th target token's index
+    sliced_seq_tmp = seq_tmp[0, :first_target_index]
+    sliced_attn_mask = attn_mask[0, :first_target_index]
+
+    # Step 3: Initialize autoregressive generation variables
+    generated_tokens = []  # Store generated tokens
+    max_generation_steps = 7  # Generate 7 tokens
+
+    for step in range(max_generation_steps):
+        # Add batch dimension for input to model
+        sliced_seq_tmp = sliced_seq_tmp.unsqueeze(0)  # Shape: (1, seq_len)
+        sliced_attn_mask = sliced_attn_mask.unsqueeze(0)  # Shape: (1, seq_len)
+
+        # Pass current sequence through the model
+        outputs = model(input_ids=sliced_seq_tmp, attention_mask=sliced_attn_mask)
+        logits = outputs.logits  # Shape: (1, seq_len, vocab_size)
+
+        # Get the predicted token for the last position
+        logit_for_last_token = logits[0, -1, :]  # Last token's logits
+        pred_token = torch.argmax(logit_for_last_token, dim=-1)  # Predicted token ID
+        generated_tokens.append(pred_token.item())  # Append to generated tokens list
+
+        # Step 4: Update seq_tmp and attn_mask for next step
+        sliced_seq_tmp = torch.cat([sliced_seq_tmp.squeeze(0), pred_token.unsqueeze(0)], dim=0)  # Add token to seq_tmp
+        sliced_attn_mask = torch.cat([sliced_attn_mask.squeeze(0), torch.tensor([1]).to(sliced_attn_mask.device)], dim=0)  # Add attention mask
+
+    # Step 5: Print the resulting 7 tokens
+    print("Pred 0", generated_tokens)
+    ####################################### 
+    
     outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=False)
     logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 
