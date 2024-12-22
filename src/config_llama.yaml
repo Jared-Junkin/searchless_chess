@@ -9,31 +9,37 @@ worker_count: 2                       #
 max_context_length: 1024                    # reduce memory overhead by limiting context lengths
 attn_method: "attend_to_prev_answers"
 pad_token: "<|pad|>"
+bos_token: "<|begin_of_text|>"
 eot_token: "<|end_of_text|>"
-out_dir: '/workspace/searchless_chess/src/Llama/ckpts/sharding/'
-eval_interval: 1000
+out_dir: '/workspace/searchless_chess/src/Llama/ckpts/'
+eval_interval: 500
 log_interval: 10
 eval_iters: 0
 eval_only: False                          # if True, script exits right after the first eval
 always_save_checkpoint: True               # if True, always save a checkpoint after each eval
-log_path: "/workspace/searchless_chess/src/Llama/logs/train_1.log"
+log_path: "/workspace/searchless_chess/src/Llama/logs/train_3.log"
 LORA: False
-
+wandb_log: False
 # tensorboard logging
 tens_log: True
-tens_log_dir: "/workspace/searchless_chess/logs/"
-F2_regularization: False
+tens_log_dir: "/workspace/searchless_chess/logs/" # run this command: screen -dmS tens tensorboard --logdir=/workspace/searchless_chess/logs/ --port=6006
+
 # data
 gradient_accumulation_steps: 4             # used to simulate larger batch sizes
 
 # adamw optimizer
-learning_rate: 0.0003                      # max learning rate
+learning_rate: 0.00008                      # max learning rate
 max_iters: 100000                          # total number of training iterations
 weight_decay: 0
 beta1: 0.9
 beta2: 0.95
 grad_clip: 1.0                             # clip gradients at this value, or disable if == 0.0
-
+# f2 regularize
+F2_regularization: False
+f2_lambda: 0.0001 # penalty for f2 regularization # f2_warmup_iters, f2_decay_iters, f2_lambda, f2_lambda_end
+f2_lambda_end: 0.000005
+f2_decay_iters: 40000
+f2_warmup_iters: 2000
 # learning rate decay settings
 decay_lr: True                             # whether to decay the learning rate
 warmup_iters: 2000                         # how many steps to warm up for
@@ -45,7 +51,7 @@ backend: 'nccl'                            # 'nccl', 'gloo', etc.
 
 # system
 device_type: 'cuda'
-device: 'cuda'                             # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device: 'cuda:1'                             # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype: 'bfloat16'                          # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile: True                              # use PyTorch 2.0 to compile the model to be faster (jared is temporarily setting to false for debugging purposes.)
-description: "Attempting to shard model across both GPUs"
+description: "first try with LLama. adjusted params for language dataloader and code to fit Llama's training conventions"

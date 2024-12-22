@@ -23,6 +23,7 @@ class BagDataset(Dataset):
                  tokenizer: PreTrainedTokenizer, 
                  tokenizer_save_path: str, 
                  prompt_components: Optional[List[str]]=None, 
+                 bos_token: str = None,
                  pad_token: str = "<|padding|>",
                  eot_token: str = "<|endoftext|>") -> None:
         if not prompt_components:
@@ -75,10 +76,10 @@ class BagDataset(Dataset):
         ]
         self.encodings = {key: tokenizer.convert_tokens_to_ids(key) for key in self._CHARACTERS}
         self.encodings[pad_token] = tokenizer.convert_tokens_to_ids(pad_token)
-        self.comma_space = tokenizer.encode(", ")
+        self.comma_space = tokenizer.encode(", ", add_special_tokens=False)
         self._board = chess.Board()
         self._tokenizer = tokenizer
-        self._pretokenized_prompt = [tokenizer.encode(comp) for comp in prompt_components]
+        self._pretokenized_prompt = [tokenizer.encode(comp, add_special_tokens=False) for comp in prompt_components]
         
         
         # calculate buffer size
@@ -90,9 +91,15 @@ class BagDataset(Dataset):
         
         self.data_source = data_source # required data source object we'll sample from
         self._move_encodings = {}
+        if bos_token:
+            self.bos_token_id = [tokenizer.convert_tokens_to_ids(bos_token)]
+            self._SEQUENCE_LENGTH += 1 # add 1 extra spot for bos token if it exists.
+        else:
+            self.bos_token_id=None
+            
         self.eot_id = [tokenizer.convert_tokens_to_ids(eot_token)] # end of text token to put at end.
 
-        pad_token_id = tokenizer.convert_tokens_to_ids(pad_token)                         # get token id of pad character
+        pad_token_id = [tokenizer.convert_tokens_to_ids(pad_token)]                         # get token id of pad character
         self._predefined_array = np.full(                                                    # This array is going to be our prompty. pre-definining it so we don't have ot initialize each time
             (self._SEQUENCE_LENGTH,), pad_token_id, dtype=np.int32
         )
@@ -118,11 +125,11 @@ class BagDataset(Dataset):
             for char in move: 
                 encoding.append(self.encodings[char])
             self.all_move_encodings[move] = encoding
-        print("hello")
+        # print("hello")
 
 
         
-    def _tokenize(self, fen: str, move: SyntaxError)->Tuple[np.ndarray, np.ndarray]:
+    def _tokenize(self, fen: str, move: str)->Tuple[np.ndarray, np.ndarray]:
 
         
         spaces_characters = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
@@ -188,16 +195,27 @@ class BagDataset(Dataset):
             legal_tokens.extend(self.comma_space) # add ", " to help the LLM with readability.
             
         # assemble our final prompt
-        prompt_tokens = np.concatenate([
-            self._pretokenized_prompt[0],
-            indices,
-            self._pretokenized_prompt[1],
-            legal_tokens,
-            self._pretokenized_prompt[2],
-            best_move,
-            self.eot_id
-        ])
-        
+        if self.bos_token_id:
+            prompt_tokens = np.concatenate([
+                self.bos_token_id,
+                self._pretokenized_prompt[0],
+                indices,
+                self._pretokenized_prompt[1],
+                legal_tokens,
+                self._pretokenized_prompt[2],
+                best_move,
+                self.eot_id
+            ])
+        else:
+            prompt_tokens = np.concatenate([
+                self._pretokenized_prompt[0],
+                indices,
+                self._pretokenized_prompt[1],
+                legal_tokens,
+                self._pretokenized_prompt[2],
+                best_move,
+                self.eot_id
+            ])
         # define objects we're going to return 
         predefined_array = np.copy(self._predefined_array)
         attn_mask = np.copy(self._attn_mask)
@@ -242,6 +260,179 @@ class BagDataset(Dataset):
         attn = torch.tensor(attn, dtype=torch.bool)
         loss = torch.tensor(loss, dtype=torch.bool)
         return sequence, attn, loss, fen, move
+
+# same thing except we don't pass list of legal moves in 
+class simpleBagDataset(BagDataset):
+    def __init__(self, data_source, tokenizer, tokenizer_save_path, prompt_components = None, pad_token = "<|padding|>", eot_token = "<|endoftext|>"):
+        
+        if not prompt_components:
+            self.prompt_components = [
+                "You are a chess grandmaster. This is the board position in FEN notation: ",   # fen comes after this                                                                                                            # legal moves comes after this
+                "Which of these is the best move? Best move: "                                       # best move comes after this.     
+                
+            ]
+        assert len(self.prompt_components)==2
+        self._CHARACTERS = [
+            '0',
+            '1',
+            '2',
+            '3',
+            '4',
+            '5',
+            '6',
+            '7',
+            '8',
+            '9',
+            'a',
+            'b',
+            'c',
+            'd',
+            'e',
+            'f',
+            'g',
+            'h',
+            'p',
+            'n',
+            'r',
+            'k',
+            'q',
+            'P',
+            'B',
+            'N',
+            'R',
+            'Q',
+            'K',
+            'w',
+            '.',
+            ' '
+        ]
+        self.encodings = {key: tokenizer.convert_tokens_to_ids(key) for key in self._CHARACTERS}
+        self.encodings[pad_token] = tokenizer.convert_tokens_to_ids(pad_token)
+        self.comma_space = tokenizer.encode(", ")
+        self._tokenizer = tokenizer
+        self._pretokenized_prompt = [tokenizer.encode(comp) for comp in self.prompt_components]
+        
+        
+        # calculate buffer size
+        self._SEQUENCE_LENGTH=77 + sum([len(prompt) for prompt in self._pretokenized_prompt]) + 5 + 1 # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
+        # +5 for max length of move. +1 for eot token
+        self.data_source = data_source # required data source object we'll sample from
+        self._move_encodings = {}
+        self.eot_id = [tokenizer.convert_tokens_to_ids(eot_token)] # end of text token to put at end.
+
+        pad_token_id = tokenizer.convert_tokens_to_ids(pad_token)                         # get token id of pad character
+        self._predefined_array = np.full(                                                    # This array is going to be our prompty. pre-definining it so we don't have ot initialize each time
+            (self._SEQUENCE_LENGTH,), pad_token_id, dtype=np.int32
+        )
+        self._loss_mask: np.ndarray = np.full(
+            shape=(self._SEQUENCE_LENGTH,),
+            fill_value=False,
+            dtype=bool
+        )
+        
+        self._attn_mask: np.ndarray = np.full(
+            shape=(self._SEQUENCE_LENGTH,),
+            fill_value=False,
+            dtype=bool
+        )
+        
+
+    def _tokenize(self, fen: str, move: SyntaxError)->Tuple[np.ndarray, np.ndarray]:
+
+        
+        spaces_characters = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
+
+        # extract relevant board informatino from fen
+        board, side, castling, en_passant, halfmoves_last, fullmoves = fen.split(' ')
+        board = board.replace('/', '')
+        board = side + board
+
+        indices = list()
+
+
+
+        # replace integer representations of empty space with dots (5 -> .....)
+        for char in board:
+            if char in spaces_characters:
+                indices.extend(int(char) * [self.encodings['.']])
+            else:
+                indices.append(self.encodings[char])
+        # if no one can castle, make castling ....
+        if castling == '-':
+            indices.extend(4 * [self.encodings['.']])
+        # otherwise, pad castling to be four characters exactly.
+        else:
+            for char in castling:
+                indices.append(self.encodings[char])
+            # Padding castling to have exactly 4 characters.
+            if len(castling) < 4:
+                indices.extend((4 - len(castling)) * [self.encodings['.']])
+
+        # if en passant isn't possible, make it .. otherwise, it will be e3 (for example). the square where en passant is possible.
+        if en_passant == '-':
+            indices.extend(2 * [self.encodings['.']])
+        else:
+            # En passant is a square like 'e3'.
+            for char in en_passant:
+                indices.append(self.encodings[char])
+
+        # Three digits for halfmoves (since last capture) is enough since the game
+        # ends at 50. AI doesn't care about halfmoves. just noise
+        halfmoves_last += '.' * (3 - len(halfmoves_last))
+        indices.extend([self.encodings[x] for x in halfmoves_last])
+
+        # AI also doesn't care about fullmoves
+        # Three digits for full moves is enough (no game lasts longer than 999
+        # moves).
+        fullmoves += '.' * (3 - len(fullmoves))
+        indices.extend([self.encodings[x] for x in fullmoves])
+        
+        # encode best move. Encoding explicitly on a letter-by-letter basis.
+        best_move=list()
+        for char in move:
+            best_move.append(self.encodings[char])
+            # set up loss mask 
+        # if len(move)==5:
+        #     print("hello")
+        
+            
+        # assemble our final prompt
+        prompt_tokens = np.concatenate([
+            self._pretokenized_prompt[0],
+            indices,
+            self._pretokenized_prompt[1],
+            best_move,
+            self.eot_id
+        ])
+        
+        # define objects we're going to return 
+        predefined_array = np.copy(self._predefined_array)
+        attn_mask = np.copy(self._attn_mask)
+        loss_mask = np.copy(self._loss_mask)
+        
+        # copy prompt into predefined array
+        tokens_to_copy = min(len(prompt_tokens), len(predefined_array))
+        predefined_array[:tokens_to_copy] = prompt_tokens[:tokens_to_copy]
+        
+        # set the model only to attend to non-padding tokens.
+        attn_mask[:tokens_to_copy] = True
+
+        
+        # make sure loss mask aligns with tokens we want to predict
+        loss_mask[tokens_to_copy-len(best_move)-1:tokens_to_copy] = True # calculate loss on only location of token we want to predict (-1 in there because we want it to predict <|endoftext|>)
+        
+
+        assert len(predefined_array) == self._SEQUENCE_LENGTH
+
+
+        return predefined_array, attn_mask, loss_mask
+    
+    def __len__(self):
+        return super().__len__()
+    def __getitem__(self, idx):
+        return super().__getitem__(idx)
+    
+ 
     
 class LlamaLoader:
     
@@ -281,14 +472,25 @@ class LlamaLoader:
                 )
         else:
             num_records = len(data_source)
-
-        dataset: Dataset = BagDataset(tokenizer=config.tokenizer, 
-                                    tokenizer_save_path=config.tokenizer_save_path,
-                                    data_source=data_source,
-                                    pad_token=training_config["pad_token"],
-                                    eot_token=training_config["eot_token"],
-                                    prompt_components=None
-                                    )
+        if "bos_token" in training_config:
+            # llama expects a bos token at the start of its inputs while pythia does not.
+            dataset: Dataset = BagDataset(tokenizer=config.tokenizer, 
+                                        tokenizer_save_path=config.tokenizer_save_path,
+                                        data_source=data_source,
+                                        pad_token=training_config["pad_token"],
+                                        eot_token=training_config["eot_token"],
+                                        prompt_components=None,
+                                        bos_token=training_config["bos_token"]
+                                        )
+        else:
+            dataset: Dataset = BagDataset(tokenizer=config.tokenizer, 
+                            tokenizer_save_path=config.tokenizer_save_path,
+                            data_source=data_source,
+                            pad_token=training_config["pad_token"],
+                            eot_token=training_config["eot_token"],
+                            prompt_components=None,
+                            bos_token=None
+                            )
         if world_size > 1:
             sampler: DistributedSampler = DistributedSampler(
                 dataset,

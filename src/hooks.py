@@ -1,10 +1,12 @@
 
 from typing import List, Dict, Any, Tuple, Callable, Optional
 from abc import ABC, abstractmethod
+from language_data_loader import LlamaLoader
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 from torch.distributed import init_process_group
+import math
 # abstract hook class
 import numpy as np
 import wandb
@@ -264,8 +266,70 @@ def F2_loss_hook(model: AutoModelForCausalLM,
 #     outputs = model(input_ids = seq_tmp, attention_mask=attn_mask)
 #     logits = outputs.logits
     
+def fast_forward_step_hook(seq: torch.Tensor,
+                      loss_mask: torch.Tensor,
+                      attn_mask: torch.Tensor,
+                      model: AutoModelForCausalLM,
+                      gradient_accumulation_steps: int,
+                      method: str = "dont_attend_to_prev_answers",
+                      attentions: bool = True
+                      )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    seq_tmp = seq
+    outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=False)
+    logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+
+    # Shift labels by one
+    shifted_labels = seq[:, 1:].clone()      # The model at position i predicts seq[i+1]
+    shifted_mask = loss_mask[:, 1:]          # Shift mask as well
+    logits = logits[:, :-1, :]               # Align logits so they match shifted_labels
     
 
+    # Set non-target positions to -100
+    shifted_labels[shifted_mask == 0] = -100
+
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+    loss = loss_fn(logits.reshape(-1, logits.size(-1)), shifted_labels.view(-1))
+    loss = loss / gradient_accumulation_steps
+    return loss
+# this must be run on the master process
+def eval_hook(loader_iter: LlamaLoader,
+              device: str,
+                      model: AutoModelForCausalLM,
+                      iter_num: int,
+                      logger: logging.Logger,
+                      
+                      num_eval_intervals = 100
+                      )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    model.eval()
+    with torch.no_grad():
+        acc = 0
+        loss_avg = 0
+        avg_correct_prob = 0
+        avg_chosen_prob = 0
+        
+        for i in range(num_eval_intervals):
+            seq, attn_mask, loss_mask,fen,_ = next(loader_iter)
+            seq = seq.to(device)
+            attn_mask = attn_mask.to(device)
+            loss_mask=loss_mask.to(device)
+            # forward step hook.
+            # calc and log averages
+            # make sure your dataloader can handle running out of samples (it can. good job past jared)
+            loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = forward_step_hook(seq=seq,
+                                                                                   loss_mask=loss_mask,
+                                                                                   attn_mask=attn_mask,
+                                                                                   model=model,
+                                                                                   gradient_accumulation_steps=1,
+                                                                                   method="attend_to_prev_answers")
+            acc += sequence_accuracy
+            avg_correct_prob += mean_correct_prob
+            avg_chosen_prob += mean_chosen_prob
+            loss_avg += loss
+            logger.info(f"eval iter {i}, loss: {loss}, seq_acc:{sequence_accuracy*100:.2f}%, gt. conf: {math.exp(mean_correct_prob):.4f}, ans. conf: {math.exp(mean_chosen_prob):.4f} diff: {(math.exp(mean_chosen_prob) - math.exp(mean_correct_prob)):.4f}")
+        logger.info(f"eval hook iter {iter_num}: loss {loss_avg/num_eval_intervals:.4f}, seq_acc: {(acc/num_eval_intervals)*100:.2f}%, gt. conf: {math.exp(avg_correct_prob/num_eval_intervals):.4f}, ans. conf: {math.exp(avg_chosen_prob/num_eval_intervals):.4f} diff: {(math.exp(avg_chosen_prob/num_eval_intervals) - math.exp(avg_correct_prob/num_eval_intervals)):.4f}")
+    model.train()    
+    return loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob
+        
 def forward_step_hook(seq: torch.Tensor,
                       loss_mask: torch.Tensor,
                       attn_mask: torch.Tensor,
@@ -285,40 +349,40 @@ def forward_step_hook(seq: torch.Tensor,
         raise NotImplementedError(f"Method {method} is not a valid input. See hooks.py ~ forward_step_hook for details.")
     
     ######### jared's sanity check:
-    # Step 1: Find the index of the 0th target token
-    target_indices = torch.where(loss_mask[0])[0]  # Indices of target tokens in the sequence
-    if target_indices.numel() == 0:
-        raise ValueError("No target tokens found in the sequence.")
-    first_target_index = target_indices[0].item()
+    # # Step 1: Find the index of the 0th target token
+    # target_indices = torch.where(loss_mask[0])[0]  # Indices of target tokens in the sequence
+    # if target_indices.numel() == 0:
+    #     raise ValueError("No target tokens found in the sequence.")
+    # first_target_index = target_indices[0].item()
 
-    # Step 2: Slice seq_tmp[0] and attn_mask[0] up to the 0th target token's index
-    sliced_seq_tmp = seq_tmp[0, :first_target_index]
-    sliced_attn_mask = attn_mask[0, :first_target_index]
+    # # Step 2: Slice seq_tmp[0] and attn_mask[0] up to the 0th target token's index
+    # sliced_seq_tmp = seq_tmp[0, :first_target_index]
+    # sliced_attn_mask = attn_mask[0, :first_target_index]
 
-    # Step 3: Initialize autoregressive generation variables
-    generated_tokens = []  # Store generated tokens
-    max_generation_steps = 7  # Generate 7 tokens
+    # # Step 3: Initialize autoregressive generation variables
+    # generated_tokens = []  # Store generated tokens
+    # max_generation_steps = 7  # Generate 7 tokens
 
-    for step in range(max_generation_steps):
-        # Add batch dimension for input to model
-        sliced_seq_tmp = sliced_seq_tmp.unsqueeze(0)  # Shape: (1, seq_len)
-        sliced_attn_mask = sliced_attn_mask.unsqueeze(0)  # Shape: (1, seq_len)
+    # for step in range(max_generation_steps):
+    #     # Add batch dimension for input to model
+    #     sliced_seq_tmp = sliced_seq_tmp.unsqueeze(0)  # Shape: (1, seq_len)
+    #     sliced_attn_mask = sliced_attn_mask.unsqueeze(0)  # Shape: (1, seq_len)
 
-        # Pass current sequence through the model
-        outputs = model(input_ids=sliced_seq_tmp, attention_mask=sliced_attn_mask)
-        logits = outputs.logits  # Shape: (1, seq_len, vocab_size)
+    #     # Pass current sequence through the model
+    #     outputs = model(input_ids=sliced_seq_tmp, attention_mask=sliced_attn_mask)
+    #     logits = outputs.logits  # Shape: (1, seq_len, vocab_size)
 
-        # Get the predicted token for the last position
-        logit_for_last_token = logits[0, -1, :]  # Last token's logits
-        pred_token = torch.argmax(logit_for_last_token, dim=-1)  # Predicted token ID
-        generated_tokens.append(pred_token.item())  # Append to generated tokens list
+    #     # Get the predicted token for the last position
+    #     logit_for_last_token = logits[0, -1, :]  # Last token's logits
+    #     pred_token = torch.argmax(logit_for_last_token, dim=-1)  # Predicted token ID
+    #     generated_tokens.append(pred_token.item())  # Append to generated tokens list
 
-        # Step 4: Update seq_tmp and attn_mask for next step
-        sliced_seq_tmp = torch.cat([sliced_seq_tmp.squeeze(0), pred_token.unsqueeze(0)], dim=0)  # Add token to seq_tmp
-        sliced_attn_mask = torch.cat([sliced_attn_mask.squeeze(0), torch.tensor([1]).to(sliced_attn_mask.device)], dim=0)  # Add attention mask
+    #     # Step 4: Update seq_tmp and attn_mask for next step
+    #     sliced_seq_tmp = torch.cat([sliced_seq_tmp.squeeze(0), pred_token.unsqueeze(0)], dim=0)  # Add token to seq_tmp
+    #     sliced_attn_mask = torch.cat([sliced_attn_mask.squeeze(0), torch.tensor([1]).to(sliced_attn_mask.device)], dim=0)  # Add attention mask
 
-    # Step 5: Print the resulting 7 tokens
-    print("Pred 0", generated_tokens)
+    # # Step 5: Print the resulting 7 tokens
+    # print("Pred 0", generated_tokens)
     ####################################### 
     
     outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=False)

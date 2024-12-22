@@ -58,3 +58,5 @@ src/wandb/
 
 # ignore everything inside /workspace/searchless_chess/src/Llama
 src/Llama/
+
+*.png

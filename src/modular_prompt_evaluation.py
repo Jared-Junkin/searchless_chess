@@ -79,6 +79,117 @@ PROMPTS = {
     #     "Which of these is the best move? Best move: \n1. "
     # ],
 }
+
+def update_statistics(candidate: str, statistics: dict, best_move: str, valid_san_moves: set, legal_moves: List)->dict:
+    if candidate in valid_san_moves:
+        statistics["valid_san_moves"] += 1
+    if candidate in legal_moves:
+        statistics["legal_moves"] += 1
+    if candidate == best_move:
+        statistics["best_moves"] += 1
+    if candidate == legal_moves[0]:
+        statistics["first_move_chosen"] += 1
+    if edit_distance(candidate, best_move) < 2:
+        statistics["offByOneOrZero"] += 1
+    if edit_distance(candidate, best_move) < 2 or candidate in legal_moves:
+        statistics["offByOneOrZeroOrLegalMove"] += 1
+    # if any(candidate.strip())
+    # print(f"candidate {candidate} valid san: {candidate in valid_san_moves}, legal: {candidate in legal_moves}, {candidate} == {best_move}: {candidate == best_move}, off by 1 {edit_distance(candidate, best_move) < 2}")
+    statistics["total_prompts"] += 1
+    return statistics
+def quantify_exposure_bias(    model: AutoModelForCausalLM,
+    data_iter: LlamaLoader,
+    tokenizer,
+    device: str,
+    model_name: str,
+    num_batches: int = 2,
+    strip_away_characters: bool = False,
+    file_path: str = "prompt_statistics.txt"
+) -> None:
+    pad_token_id = tokenizer.convert_tokens_to_ids(config["pad_token"])
+    print(f"Entered function")
+    # Calculate exhaustive list of all valid SAN moves
+    all_moves = utils._compute_all_possible_actions()
+    valid_san_moves = set(all_moves[0].keys())
+
+    # Initialize stockfish helper to annotate how good our moves are
+    stockfish_path = "/usr/games/stockfish"
+    board = chess.Board()
+
+
+
+    # Iterate over all prompt templates
+    for prompt_name, prompt_template in PROMPTS.items():
+        # Dictionary to store statistics with descriptive keys
+        statistics = {
+            "prompt_name": prompt_name,
+            "model_name": model_name,
+            "Generative": "No",
+            "total_prompts": 0,
+            "valid_san_moves": 0,
+            "legal_moves": 0,
+            "first_move_chosen": 0,
+            "best_moves": 0,
+            "offByOneOrZero": 0,
+            "offByOneOrZeroOrLegalMove": 0
+        }
+        statistics_generative = statistics.copy()
+        statistics_generative["Generative"]="Yes"
+        print(f"Prompt template is {prompt_template}")
+
+        # Iterate over all batches we've decided to load
+        for i in range(num_batches):
+            print(f"starting batch {i}")
+            seq, attn_mask, loss_mask, fen_batch, best_move_batch = next(data_iter)
+            with torch.no_grad():
+                seq=seq.to(model.device)
+                attn_mask = attn_mask.to(model.device)
+                loss_mask = loss_mask.to(model.device)
+                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = forward_step_hook(seq=seq,
+                                                                            loss_mask=loss_mask,
+                                                                            attn_mask=attn_mask,
+                                                                            model=model,
+                                                                            gradient_accumulation_steps=1, # don't care about this input here.
+                                                                            method=config["attn_method"])
+                # logits_beam, indices_beam = beam_search(logits=logits, loss_mask=loss_mask[:, 1:])
+                token_indices = torch.nonzero(shifted_mask)  # Indices of tokens we care about
+                row_indices = token_indices[:, 0]
+                col_indices = token_indices[:, 1]
+
+                unique_rows = torch.unique(row_indices)
+                full_predicted_tokens = torch.argmax(logits, dim=-1)  # (batch, seq_len)
+                predicted_tokens = full_predicted_tokens[row_indices, col_indices]
+                grouped_predicted_tokens = []
+                for row in unique_rows:
+                    current_row_mask = (row_indices == row)
+                    row_preds = predicted_tokens[current_row_mask] # predicted tokens for this row
+                    grouped_predicted_tokens.append(tokenizer.decode(row_preds[:-1]))
+                    # best_move_str = tokenizer.decode(row_preds[:-1])
+            i = 0
+            for fen, best_move in zip(fen_batch, best_move_batch):
+                output = grouped_predicted_tokens[i]
+                cutoff = int(torch.where(loss_mask[i])[0][0])
+                outputs = model.generate(input_ids=seq[i][:cutoff].unsqueeze(0), attention_mask=attn_mask[i][:cutoff].unsqueeze(0), max_length=cutoff+7, pad_token_id=pad_token_id)
+                generated_output = tokenizer.decode(outputs[0][torch.where(loss_mask[i])[0][:-1]])#stripping out endoftextpad at end
+                print(f"best move: {best_move}, output: {output}, generated_output: {generated_output}")
+                # tokens, move_probs = getBeamsFromMatrix(probs=logits_beam[i], indices=indices_beam[i], num_beams=5)
+                # candidates = [tokenizer.decode(move) for move in tokens]
+                board.set_fen(fen)
+                legal_moves = [str(m) for m in board.legal_moves]
+                statistics = update_statistics(candidate=output, statistics=statistics, best_move=best_move, valid_san_moves=valid_san_moves, legal_moves=legal_moves)
+                statistics_generative = update_statistics(candidate=generated_output, statistics=statistics_generative, best_move=best_move, valid_san_moves=valid_san_moves, legal_moves=legal_moves)
+                i+=1
+
+        # Write statistics to a YAML file
+        with open(file_path, "a") as f:
+            for key, value in statistics.items():
+                f.write(f"{key}: {value}\n")
+            f.write("-" * 40 + "\n")
+            for key, value in statistics_generative.items():
+                f.write(f"{key}: {value}\n")
+            f.close()
+        
+        print(f"Statistics saved to {file_path}")
 def edit_distance(s1, s2):
     return sum(a != b for a, b in zip(s1, s2)) + abs(len(s1) - len(s2))
 
@@ -135,6 +246,7 @@ def prompt_evaluation(
     num_batches: int = 2,
     strip_away_characters: bool = False
 ) -> None:
+    pad_token_id = tokenizer.convert_tokens_to_ids(config["pad_token"])
     print(f"Entered function")
     # Calculate exhaustive list of all valid SAN moves
     file_path = "prompt_statistics.txt"
@@ -195,6 +307,10 @@ def prompt_evaluation(
             i = 0
             for fen, best_move in zip(fen_batch, best_move_batch):
                 output = grouped_predicted_tokens[i]
+                # cutoff = int(torch.where(loss_mask[i])[0][0])
+                # outputs = model.generate(input_ids=seq[i][:cutoff].unsqueeze(0), attention_mask=attn_mask[i][:cutoff].unsqueeze(0), max_length=cutoff+7, pad_token_id=pad_token_id)
+                # generated_output = tokenizer.decode(outputs[0][torch.where(loss_mask[i])[0][:-1]])#stripping out endoftextpad at end
+                # print(f"best move: {best_move}, output: {output}, generated_output: {generated_output}")
                 tokens, move_probs = getBeamsFromMatrix(probs=logits_beam[i], indices=indices_beam[i], num_beams=5)
                 candidates = [tokenizer.decode(move) for move in tokens]
                 board.set_fen(fen)
@@ -226,7 +342,7 @@ def prompt_evaluation(
                     statistics["offByOneOrZeroOrLegalMove"] += 1
                 # if any(candidate.strip())
                 statistics["total_prompts"] += 1
-                print(f"chosen move: {output}, best move: {best_move}, edit distance: {edit_distance(output, best_move)}, candidates: {candidates}, probs: {move_probs}")
+                # print(f"chosen move: {output}, best move: {best_move}, edit distance: {edit_distance(output, best_move)}, candidates: {candidates}, probs: {move_probs}")
                 # print(
                 #     f"Best move: {best_move}, prediction: {output}, legal move? {output in legal_moves}"
                 # )
@@ -245,8 +361,9 @@ if __name__ == "__main__":
     # model_load_path = "./Llama/llama-3.2-1B"
     # model_name = "Llama3.2-1B"
     config_file = "/workspace/searchless_chess/src/config_pythia.yaml"
-    model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_ft/ckpt68000"
-    model_name = "pythia-160m"
+    model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_new_nof2/ckpt108000"
+    
+    model_name = "pythia-160m/no_f2decay_ckpt108000"
     with open(config_file, "r") as stream:
         config = yaml.load(stream=stream, Loader=Loader)
 
@@ -279,6 +396,7 @@ if __name__ == "__main__":
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}['bfloat16']
     ctx = nullcontext() if config['device_type'] == 'cpu' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
     with ctx if ctx else torch.no_grad():  # Use ctx if provided, else default no_grad context
-        prompt_evaluation(model, data_iter,tokenizer=tokenizer, model_name=model_name, device=device, strip_away_characters=True, num_batches=20)
+        # prompt_evaluation(model, data_iter,tokenizer=tokenizer, model_name=model_name, device=device, strip_away_characters=True, num_batches=20)
+        quantify_exposure_bias(model, data_iter,tokenizer=tokenizer, model_name=model_name, device=device, strip_away_characters=True, num_batches=20,file_path="./pythia/exposure_bias.txt")
     if ddp:
         destroy_process_group()

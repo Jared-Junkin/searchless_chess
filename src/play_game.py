@@ -6,12 +6,11 @@ import random
 import time
 import platform
 import random
-
+from pythiaPlayer import PythiaPlayer
 
 # NOTE: LLAMA AND NANOGPT ARE EXPERIMENTAL PLAYERS that most people won't need to use
 # They are commented by default to avoid unnecessary dependencies such as pytorch.
-# from llama_module import BaseLlamaPlayer, LocalLlamaPlayer, LocalLoraLlamaPlayer
-from jared_models.nanoGPT  import NanoGptPlayer
+
 # import gpt_query
 
 from typing import Optional, Tuple
@@ -217,7 +216,7 @@ def record_results(
 
     if RUN_FOR_ANALYSIS:
         csv_file_path = (
-            f"logs/{player_one_recording_name}_vs_{player_two_recording_name}"
+            f"/workspace/searchless_chess/src/pythia/logs/{player_one_recording_name}_vs_{player_two_recording_name}"
         )
         csv_file_path = csv_file_path.replace(
             ".", "_"
@@ -229,7 +228,7 @@ def record_results(
     # Determine if we need to write headers (in case the file doesn't exist yet)
     write_headers = not os.path.exists(csv_file_path)
 
-    # Append the results to the CSV file
+        
     with open(csv_file_path, "a", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=info_dict.keys())
         if write_headers:
@@ -632,46 +631,54 @@ def play_game(
 RUN_FOR_ANALYSIS = True
 recording_file = "logs/determine.csv"  # default recording file. Because we are using list [player_ones], recording_file is overwritten
 # player_ones = ['ckpt12000.pt']# player_ones = ["ckpt600000.pt"]
-player_ones = ['ckpt' + str(600000) + ".pt"]
 # player_two_recording_name = "stockfish"
-
-CODEX = InferenceTimeBehavioralCloning()
+model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_ft/ckpt88000"
+player_ones = ["pythia160m_ckpt88000"]
 if __name__ == "__main__":
+    '''
+    
+        def __init__(self, 
+                 tokenizer_config_path: str, 
+                 model_config_path: str, 
+                 pad_token: str = "<|padding|>",
+                 draws_okay: bool = False, 
+                 prompt_components: Optional[List[str]]=None
+    '''
     
     ## playing a human game aginst the bot
-    start = 1 # forcing human to play black
-    if start == 0: # human is white
-        color = "white"
-        player_one = humanPlayer()
-        player_one_recording_name = "human"
-        player_two_recording_name = player_ones[0]
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-    else: # human is black
-        color = "black"
-        player_one_recording_name = player_ones[0]
-        player_two_recording_name = "human"
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-        player_two = humanPlayer()
-    print(f"Starting game against model {player_ones[0]}. You are {color}. Good luck!")
-    play_game_human(player_one=player_one, player_two=player_two)
+    # start = 1 # forcing human to play black
+    # if start == 0: # human is white
+    #     color = "white"
+    #     player_one = humanPlayer()
+    #     player_one_recording_name = "human"
+    #     player_two_recording_name = player_ones[0]
+    #     player_one = PythiaPlayer(tokenizer_config_path=model_load_path, model_config_path=model_load_path, draws_okay=False)
+    # else: # human is black
+    #     color = "black"
+    #     player_one_recording_name = player_ones[0]
+    #     player_two_recording_name = "human"
+    #     player_one = PythiaPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+    #     player_two = humanPlayer()
+    # print(f"Starting game against model {player_ones[0]}. You are {color}. Good luck!")
+    # play_game_human(player_one=player_one, player_two=player_two)
     
     
-    ## play 100 games against each stockfish agent to test how strong the model really is
-    # stockfish_play_time=0.1
-    # num_games=100
-    # player_one_recording_name=player_ones[0]
-    # for i in range(11):
-    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-    #     player_two_recording_name = "stockfish" + str(i)
-    #     player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
-    #     play_game(player_one, player_two, num_games)
+    # play 100 games against each stockfish agent to test how strong the model really is
+    stockfish_play_time=0.1
+    num_games=100
+    player_one_recording_name=player_ones[0]
+    for i in range(11):
+        player_one = PythiaPlayer(tokenizer_config_path=model_load_path, model_config_path=model_load_path, draws_okay=False)
+        player_two_recording_name = "stockfish" + str(i)
+        player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+        play_game(player_one, player_two, num_games)
     
-    ## initial testing. playing a few games against a single stockfish agent of hardcoded level
-    # for player in player_ones:
-    #     player_one_recording_name = player
-    #     num_games = 10
-    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-    #     player_two = StockfishPlayer(skill_level=25, play_time=stockfish_play_time)
-    #     play_game(player_one, player_two, num_games)
+    # initial testing. playing a few games against a single stockfish agent of hardcoded level
+    for player in player_ones:
+        player_one_recording_name = player
+        num_games = 10
+        player_one = PythiaPlayer(tokenizer_config_path=model_load_path, model_config_path=model_load_path, draws_okay=False)
+        player_two = StockfishPlayer(skill_level=25, play_time=stockfish_play_time)
+        play_game(player_one, player_two, num_games)
         
     
