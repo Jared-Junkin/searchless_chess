@@ -94,6 +94,6 @@ def plot_metrics(result, filename="performance_plot.png", ignore_index: int = 0)
     plt.savefig(filename)
 
 
-result = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/train_3.log",block_size=25)# block size = 25 means 25 iters will ultimately be averaged together.
+result = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/train_4.log",block_size=100)# block size = 25 means 25 iters will ultimately be averaged together.
 print(result)
 plot_metrics(result=result, filename="./Llama/performance_plot.png", ignore_index=2)

@@ -1,4 +1,4 @@
 [White "Magnus Carlsen"]
 [Black "Stockfish"]
 
-1. e2e4 e6 2. d2d4 c6 3. c2c4 b5 4. c4b5 a6 5. b5c6 Nf6 6. c6d7 Nbxd7 7. e4e5 Bb4+ 8. c1d2 Nd5 9. d2b4 Qh4 10. g1f3 Qe4+ 11. f1e2 Nxb4 12. e1g1 Qf4 13. b1c3 O-O 14. d1b3 a5 15. a2a3 Na6 16. e2a6 Rb8 17. b3b8 Nxb8 18. a6c8 Rxc8 19. f1d1 Nc6
+1. e2e4 e6 2. d2d4 d5 3. e4e5 c5 4. c2c3 Bd7 5. g1f3 cxd4 6. c3d4 h6 7. f1d3 Nc6 8. e1g1 Qb6 9. b1c3 Nxd4 10. f3d4 Qxd4 11. c1e3 Qxe5 12. d1b3 Bc6

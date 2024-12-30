@@ -27,57 +27,88 @@ import torch.distributed as dist
 import traceback
 
 
+def eval_wrapper(config: dict, expand_path: str = None)->None:
+    def extract_number_from_checkpoint(checkpoint):
+        # Extract the numeric part of the string without using regex
+        number = ""
+        for char in checkpoint:
+            if char.isdigit():
+                number += char
+        return int(number) if number else None
+    
+    
+    logger = setupLogger(config=config)
+    ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}['bfloat16']
+    ctx = nullcontext() if config['device_type'] == 'cpu' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
+    config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
+    
+    
+    tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"]) # tokenizer is always going to be the same.
+    # train_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="train")
+    test_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="test")
+    
+    if expand_path is not None: # if expand path is not none, it will evaluate all models at expand path. otherwise, it will only evaluate the one model currently specified in config
+        all_dirs = os.listdir(expand_path)
+        ckpt_directories = [entry for entry in all_dirs if 'ckpt' in entry and os.path.isdir(os.path.join(expand_path, entry))]
+        for ckpt in ckpt_directories:
+            ckpt_path = os.path.join(expand_path, ckpt)
+            logger.info(f"starting ckpt {ckpt}")
+            # tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
+            model = AutoModelForCausalLM.from_pretrained(ckpt_path)
+            model.to(device)
+            iter_num = extract_number_from_checkpoint(checkpoint=ckpt)
+            estimate_loss(model=model, eval_iters=20, loader=test_iter, tokenizer=tokenizer,logger=logger, iter_num=iter_num+17000, ctx=ctx)
+            
+    else:
+        # tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"])
+        model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
+            
+        model.to(device)
 
+            
+        estimate_loss(model=model, eval_iters=1, train_loader=train_iter, test_loader=test_iter, tokenizer=tokenizer,logger=logger, iter_num=101000, ctx=ctx)
+        # destroy subprocess at end
+    if ddp:
+        destroy_process_group()
 @torch.no_grad()
-def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, train_loader: DataLoader,test_loader: DataLoader, tokenizer, logger, iter_num:int,  ctx=None) -> dict:
+def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, loader: DataLoader, tokenizer, logger, iter_num:int,  ctx=None, split: str = "test") -> dict:
     
     out = {}
     model.eval()  # Set model to evaluation mode
-    for split, loader in [('train', train_loader), ('val', test_loader)]:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            seq, attn_mask, loss_mask, _, _ = next(loader)
+    losses = torch.zeros(eval_iters)
+    for _ in range(eval_iters):
+        
+        
+        
+        
+        
+        seq, attn_mask, loss_mask, _, _ = next(loader)
+        seq = seq.to(model.device)
+        attn_mask = attn_mask.to(model.device)
+        loss_mask=loss_mask.to(model.device)
+
+        with ctx if ctx else torch.no_grad():  # Use ctx if provided, else default no_grad context
+            loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = eval_hook(seq=seq,
+                                                            loss_mask=loss_mask,
+                                                            attn_mask=attn_mask,
+                                                            model=model)
             
-            seq = seq.to(model.device)
-            attn_mask = attn_mask.to(model.device)
-            loss_mask=loss_mask.to(model.device)
+            log_batch_details_hook(
+                outputs=outputs,
+                shifted_mask=shifted_mask,
+                shifted_labels=shifted_labels,
+                logits=logits,
+                iter_num=iter_num,
+                loss=loss,
+                config=config,
+                tokenizer=tokenizer,
+                logger=logger,
+                attn_mask=attn_mask,
+                seq_tmp=seq_tmp
+            )
+            
 
-            with ctx if ctx else torch.no_grad():  # Use ctx if provided, else default no_grad context
-                outputs = model(**{"input_ids": seq, "attention_mask": attn_mask}) 
-                logits = outputs.logits
-                loss_fn = torch.nn.CrossEntropyLoss(reduction='none')  # Use 'none' to apply loss mask
-                loss = loss_fn(logits.view(-1, logits.size(-1)), seq.view(-1))  # Shape: (batch_size * seq_len)
-
-                # Apply the loss mask
-                loss = loss.view(seq.size(0), seq.size(1))  # Reshape to (batch_size, seq_len)
-                loss = loss * loss_mask  # Mask out non-target tokens (logical False = 1, logical True = 0
-                loss = loss.sum() / (~loss_mask).sum()  # Normalize over unmasked tokens
-            losses[k] = loss.item()
-
-        out[split] = losses.mean().item()
-
-    # with ctx if ctx else torch.no_grad():
-        
-    #     seq, attn_mask, loss_mask,_,_ = next(loader)
-    #     seq = seq.to(model.device)
-    #     loss_mask = loss_mask.to(model.device)
-    #     attn_mask = attn_mask.to(model.device)
-        
-    #     outputs = model(**{"input_ids": seq, "attention_mask": attn_mask}) # I think this will output gibberish now becaus I haven't trained the model to understand my new tokens yet.
-    #     logits = outputs.logits  # Shape: (batch_size, seq_len, vocab_size). torch.argmax(logits, dim=-1) gets the token it thinks is most likely to follow the initial i tokens. 
-
-    #     predicted_tokens = torch.argmax(logits, dim=-1)
-    #     preds = tokenizer.decode(predicted_tokens[0])
-    #     indices=(~loss_mask.int()).argmax(dim=1)
-    #     logger.info(f"iter: {iter_num}, predicted_token: {tokenizer.decode(predicted_tokens[0][indices[0]])}, neighborhood: {tokenizer.decode(predicted_tokens[0][indices[0]-3:indices[0]+3])}, \n all_preds: {preds} \n\n\n")
-        
-                        ## to generate (inference time):
-        # input_dict = {"input_ids": seq[0].unsqueeze(0), "attention_mask": attn_mask[0].unsqueeze(0)}
-        # num_tokens = input_dict["input_ids"].shape[1]
-        # tokens_gen = model.module.generate(**input_dict, max_length=len(seq[0]) + 7)
-        # generated_tokens = outputs[0][num_tokens:]
-        # txt = tokenizer.decode(generated_tokens)
-        # logger.info(f"iter: {iter_num} predictions: {txt}")
+    out[split] = losses.mean().item()
     logger.info(f"done eval")
     model.train()  # Set model back to training mode
     ### temporary code in here as a sanity check.
@@ -373,7 +404,7 @@ def training(config: dict) -> None:
         #               model=model,
         #               ddp=ddp)
         # flush the gradients as soon as we can, no need for this memory anymore
-        if config["tens_log"] and master_process and iter_num % (eval_interval // 2) == 0:
+        if config["tens_log"] and master_process and iter_num % (eval_interval * 10) == 0:
             logger.info(f"logging tensorboard on iter {iter_num}")
             nbins = 512  # Set the desired number of bins
 
@@ -518,7 +549,9 @@ if __name__ == "__main__":
 
     with open(config_file, "r") as stream:
         config = yaml.load(stream=stream, Loader=Loader)
-
-    run_with_error_handling(training, config=config, log_path=config["log_path"])
+    
+    
+    run_with_error_handling(eval_wrapper, config=config, expand_path = "/workspace/searchless_chess/src/Llama/ckpts_new/", log_path=config["log_path"])
+    # run_with_error_handling(training, config=config, log_path=config["log_path"])
     # run_with_error_handling(sweep_hyperparameters, config=config, log_path=config["log_path"])
     

@@ -7,7 +7,7 @@ from torch.distributed import barrier, init_process_group, destroy_process_group
 # from language_data_loader import load_dataloader
 from contextlib import nullcontext
 import heapq
-from hooks import forward_step_hook
+from hooks import forward_step_hook, eval_hook
 from language_data_loader import LlamaLoader
 from yaml import CLoader as Loader
 import data_loader
@@ -145,12 +145,10 @@ def quantify_exposure_bias(    model: AutoModelForCausalLM,
                 seq=seq.to(model.device)
                 attn_mask = attn_mask.to(model.device)
                 loss_mask = loss_mask.to(model.device)
-                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = forward_step_hook(seq=seq,
+                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = eval_hook(seq=seq,
                                                                             loss_mask=loss_mask,
                                                                             attn_mask=attn_mask,
-                                                                            model=model,
-                                                                            gradient_accumulation_steps=1, # don't care about this input here.
-                                                                            method=config["attn_method"])
+                                                                            model=model)
                 # logits_beam, indices_beam = beam_search(logits=logits, loss_mask=loss_mask[:, 1:])
                 token_indices = torch.nonzero(shifted_mask)  # Indices of tokens we care about
                 row_indices = token_indices[:, 0]
@@ -358,12 +356,12 @@ def prompt_evaluation(
 
 if __name__ == "__main__":
     # config_file = "/workspace/searchless_chess/src/config_llama.yaml"
-    # model_load_path = "./Llama/llama-3.2-1B"
-    # model_name = "Llama3.2-1B"
-    config_file = "/workspace/searchless_chess/src/config_pythia.yaml"
-    model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_new_nof2/ckpt108000"
+    model_load_path = "./Llama/ckpts_new/ckpt100000"
+    model_name = "./Llama/ckpts_new/ckpt100000"
+    config_file = "/workspace/searchless_chess/src/config_llama.yaml"
+    # model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_new_nof2/ckpt108000"
     
-    model_name = "pythia-160m/no_f2decay_ckpt108000"
+    # model_name = "pythia-160m/no_f2decay_ckpt108000"
     with open(config_file, "r") as stream:
         config = yaml.load(stream=stream, Loader=Loader)
 
@@ -394,7 +392,7 @@ if __name__ == "__main__":
     if ddp:
         init_process_group(backend=config['backend'])
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}['bfloat16']
-    ctx = nullcontext() if config['device_type'] == 'cpu' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
+    ctx = nullcontext() if config['device_type'] == 'cuda:0' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
     with ctx if ctx else torch.no_grad():  # Use ctx if provided, else default no_grad context
         # prompt_evaluation(model, data_iter,tokenizer=tokenizer, model_name=model_name, device=device, strip_away_characters=True, num_batches=20)
         quantify_exposure_bias(model, data_iter,tokenizer=tokenizer, model_name=model_name, device=device, strip_away_characters=True, num_batches=20,file_path="./pythia/exposure_bias.txt")

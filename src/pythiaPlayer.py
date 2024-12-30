@@ -36,6 +36,7 @@ class PythiaPlayer:
                  model_config_path: str, 
                  pad_token: str = "<|padding|>",
                  eot_token: str = "<|endoftext|>",
+                 bos_token: str = None,
                  draws_okay: bool = False, 
                  prompt_components: Optional[List[str]]=None
     ) -> None:
@@ -55,6 +56,10 @@ class PythiaPlayer:
         self.model = AutoModelForCausalLM.from_pretrained(model_config_path)
         self.model_name = model_config_path
         self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_config_path)
+        if bos_token:
+            self.bos_token_id = [self._tokenizer.convert_tokens_to_ids(bos_token)]
+        else:
+            self.bos_token_id = None
         self.pad_token_id = self._tokenizer.convert_tokens_to_ids(pad_token)
         self.eot_token_id = self._tokenizer.convert_tokens_to_ids(eot_token)
         self.helper = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
@@ -173,14 +178,25 @@ class PythiaPlayer:
             legal_tokens.extend(self.all_move_encodings[move])
             legal_tokens.extend(self.comma_space) # add ", " to help the LLM with readability.
             
-        # assemble our final prompt (no best move at end)
-        prompt_tokens = np.concatenate([
-            self._pretokenized_prompt[0],
-            indices,
-            self._pretokenized_prompt[1],
-            legal_tokens,
-            self._pretokenized_prompt[2],
-        ])
+
+        # assemble our final prompt
+        if self.bos_token_id:
+            prompt_tokens = np.concatenate([
+                self.bos_token_id,
+                self._pretokenized_prompt[0],
+                indices,
+                self._pretokenized_prompt[1],
+                legal_tokens,
+                self._pretokenized_prompt[2]
+            ])
+        else:
+            prompt_tokens = np.concatenate([
+                self._pretokenized_prompt[0],
+                indices,
+                self._pretokenized_prompt[1],
+                legal_tokens,
+                self._pretokenized_prompt[2]
+            ])
         
         return prompt_tokens
     
@@ -190,25 +206,29 @@ class PythiaPlayer:
     def get_move(self, board: chess.Board, game_state: str, temperature: float) -> str:
         if self.draws_okay:
             completion = self.get_response(fen=board.fen(), temperature=temperature)
+            # info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=5)
+            # best_move_san = info[0]['pv'][0].uci()
+            # if completion == best_move_san:
+            #     print(f"top stockfish move played: {completion}")
             return completion
         else:
+            #
+            
+            
             # if victory is certain and the bot is going to draw because of FEN, play top stockfish move
             # note that if min_wins (out of 1000 estimated according to stockfish) is less than 990, bot is on its own
             # so this won't catch forced draws. Just draws where it's almost guaranteed to win
-            if board.is_repetition(2):
-                info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=5)
-                best_move_san = info[0]['pv'][0].uci()
-                min_wins = float('Inf')
-                for variant in range(len(info)):
-                    winsDrawsLosses = info[variant]['score'].wdl()
-                    min_wins = min(min_wins, winsDrawsLosses.relative.wins)
-
-                print(f"We're about to draw. Win prob for worst move is {min_wins/1000}")
-                # if stockfish says we have >99% chance of winning on all top 5 moves, then return top move
-                # put the opponent out of their misery
-                # if min_wins > 990:
+            info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=5)
+            best_move_san = info[0]['pv'][0].uci()
+            min_wins = float('Inf')
+            for variant in range(len(info)):
+                winsDrawsLosses = info[variant]['score'].wdl()
+                min_wins = min(min_wins, winsDrawsLosses.relative.wins)
+            if min_wins>990: # if greater than 99% chance of winning from all top 5 moves
+                print(f"min_win {min_wins/1000} across best 5 moves is above 99%. Letting stockfish finish game")
                 return best_move_san
-                
+            
+        
             completion = self.get_response(board=board, temperature=temperature)
             return completion # just removing this because rightnow my decoder can only handle the most likely move.
         
@@ -229,6 +249,10 @@ class PythiaPlayer:
         target_tokens = target_tokens[target_tokens != self.pad_token_id] # strip away "<|padding|>"
         
         best_move = self._tokenizer.decode(target_tokens)
+        info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=5)
+        best_move_san = info[0]['pv'][0].uci()
+        if best_move == best_move_san:
+            print(f"top stockfish move played: {best_move}")
                 
         return best_move
     

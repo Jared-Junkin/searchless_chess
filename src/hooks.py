@@ -292,50 +292,86 @@ def fast_forward_step_hook(seq: torch.Tensor,
     loss = loss / gradient_accumulation_steps
     return loss
 # this must be run on the master process
-def eval_hook(loader_iter: LlamaLoader,
-              device: str,
+def eval_hook(seq: torch.Tensor,
+                      loss_mask: torch.Tensor,
+                      attn_mask: torch.Tensor,
                       model: AutoModelForCausalLM,
-                      iter_num: int,
-                      logger: logging.Logger,
-                      
-                      num_eval_intervals = 100
                       )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    model.eval()
-    with torch.no_grad():
-        acc = 0
-        loss_avg = 0
-        avg_correct_prob = 0
-        avg_chosen_prob = 0
-        
-        for i in range(num_eval_intervals):
-            seq, attn_mask, loss_mask,fen,_ = next(loader_iter)
-            seq = seq.to(device)
-            attn_mask = attn_mask.to(device)
-            loss_mask=loss_mask.to(device)
-            # forward step hook.
-            # calc and log averages
-            # make sure your dataloader can handle running out of samples (it can. good job past jared)
-            loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = forward_step_hook(seq=seq,
-                                                                                   loss_mask=loss_mask,
-                                                                                   attn_mask=attn_mask,
-                                                                                   model=model,
-                                                                                   gradient_accumulation_steps=1,
-                                                                                   method="attend_to_prev_answers")
-            acc += sequence_accuracy
-            avg_correct_prob += mean_correct_prob
-            avg_chosen_prob += mean_chosen_prob
-            loss_avg += loss
-            logger.info(f"eval iter {i}, loss: {loss}, seq_acc:{sequence_accuracy*100:.2f}%, gt. conf: {math.exp(mean_correct_prob):.4f}, ans. conf: {math.exp(mean_chosen_prob):.4f} diff: {(math.exp(mean_chosen_prob) - math.exp(mean_correct_prob)):.4f}")
-        logger.info(f"eval hook iter {iter_num}: loss {loss_avg/num_eval_intervals:.4f}, seq_acc: {(acc/num_eval_intervals)*100:.2f}%, gt. conf: {math.exp(avg_correct_prob/num_eval_intervals):.4f}, ans. conf: {math.exp(avg_chosen_prob/num_eval_intervals):.4f} diff: {(math.exp(avg_chosen_prob/num_eval_intervals) - math.exp(avg_correct_prob/num_eval_intervals)):.4f}")
-    model.train()    
+    seq_tmp = seq # 
+    
+    ######### jared's sanity check:
+    # # Step 1: Find the index of the 0th target token
+    # target_indices = torch.where(loss_mask[0])[0]  # Indices of target tokens in the sequence
+    # if target_indices.numel() == 0:
+    #     raise ValueError("No target tokens found in the sequence.")
+    # first_target_index = target_indices[0].item()
+
+    # # Step 2: Slice seq_tmp[0] and attn_mask[0] up to the 0th target token's index
+    # sliced_seq_tmp = seq_tmp[0, :first_target_index]
+    # sliced_attn_mask = attn_mask[0, :first_target_index]
+
+    # # Step 3: Initialize autoregressive generation variables
+    # generated_tokens = []  # Store generated tokens
+    # max_generation_steps = 7  # Generate 7 tokens
+
+    # for step in range(max_generation_steps):
+    #     # Add batch dimension for input to model
+    #     sliced_seq_tmp = sliced_seq_tmp.unsqueeze(0)  # Shape: (1, seq_len)
+    #     sliced_attn_mask = sliced_attn_mask.unsqueeze(0)  # Shape: (1, seq_len)
+
+    #     # Pass current sequence through the model
+    #     outputs = model(input_ids=sliced_seq_tmp, attention_mask=sliced_attn_mask)
+    #     logits = outputs.logits  # Shape: (1, seq_len, vocab_size)
+
+    #     # Get the predicted token for the last position
+    #     logit_for_last_token = logits[0, -1, :]  # Last token's logits
+    #     pred_token = torch.argmax(logit_for_last_token, dim=-1)  # Predicted token ID
+    #     generated_tokens.append(pred_token.item())  # Append to generated tokens list
+
+    #     # Step 4: Update seq_tmp and attn_mask for next step
+    #     sliced_seq_tmp = torch.cat([sliced_seq_tmp.squeeze(0), pred_token.unsqueeze(0)], dim=0)  # Add token to seq_tmp
+    #     sliced_attn_mask = torch.cat([sliced_attn_mask.squeeze(0), torch.tensor([1]).to(sliced_attn_mask.device)], dim=0)  # Add attention mask
+
+    # # Step 5: Print the resulting 7 tokens
+    # print("Pred 0", generated_tokens)
+    ####################################### 
+    
+    outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=False)
+    logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+
+    # Shift labels by one
+    shifted_labels = seq[:, 1:].clone()      # The model at position i predicts seq[i+1]
+    shifted_mask = loss_mask[:, 1:]          # Shift mask as well
+    logits = logits[:, :-1, :]               # Align logits so they match shifted_labels
+    
+
+    # Set non-target positions to -100
+    shifted_labels[shifted_mask == 0] = -100
+
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+    loss = loss_fn(logits.reshape(-1, logits.size(-1)), shifted_labels.view(-1))
+    # calculate the sequence accuracy.
+    pred = torch.argmax(logits, dim=-1)  # (batch_size, seq_len)
+    valid_positions = (shifted_labels != -100)
+    sequence_accuracy = ((pred == shifted_labels) | ~valid_positions).all(dim=1).float().mean()
+    
+    # calculate the mean probability of the actual best move
+    probs = torch.log_softmax(logits, dim=-1) # more memory efficient than softmax
+    correct_probs = probs[valid_positions, shifted_labels[valid_positions]]
+    mean_correct_prob = correct_probs.mean()
+    
+    # calculate the mean probability of the chosen move
+    chosen_probs = probs[valid_positions, pred[valid_positions]]
+    mean_chosen_prob = chosen_probs.mean()
     return loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob
-        
+
+
 def forward_step_hook(seq: torch.Tensor,
                       loss_mask: torch.Tensor,
                       attn_mask: torch.Tensor,
                       model: AutoModelForCausalLM,
                       gradient_accumulation_steps: int,
-                      method: str = "dont_attend_to_prev_answers",
+                      method: str = "attend_to_prev_answers",
                       attentions: bool = True
                       )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
@@ -544,6 +580,7 @@ def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_pr
         f"Mean best move prob: {torch.mean(torch.tensor(avg_best_move_probs)):.4f}, "
         f"Mean chosen move prob: {torch.mean(torch.tensor(avg_chosen_move_probs)):.4f}"
     )
+    print(f"logging batch details")
     logger.info(f"Attended tokens for sample 0: {attended_tokens}")
     logger.info(f"Attention mask for sample 0: {attn_mask[0]}")
     token_indices = torch.nonzero(attn_mask[0])
