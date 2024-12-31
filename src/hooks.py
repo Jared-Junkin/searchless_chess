@@ -265,7 +265,58 @@ def F2_loss_hook(model: AutoModelForCausalLM,
 #     seq_tmp[loss_mask == 1] = 1  # Replace target tokens in the input with pad (1)
 #     outputs = model(input_ids = seq_tmp, attention_mask=attn_mask)
 #     logits = outputs.logits
-    
+def fast_forward_step_hook_grad(seq: torch.Tensor,
+                           loss_mask: torch.Tensor,
+                           attn_mask: torch.Tensor,
+                           model: AutoModelForCausalLM,
+                           gradient_accumulation_steps: int,
+                           method: str = "dont_attend_to_prev_answers",
+                           attentions: bool = True,
+                           alpha: float = 0.5  # <-- weight for all-or-nothing penalty
+                          ) -> torch.Tensor:
+    """
+    Modified to add an auxiliary "all-or-nothing" penalty if any token is wrong.
+      - 'alpha' controls how harshly we penalize an imperfect sequence.
+    """
+
+    # 1) Forward pass
+    outputs = model(input_ids=seq, attention_mask=attn_mask, output_attentions=False)
+    logits = outputs.logits  # shape: (batch_size, seq_len, vocab_size)
+
+    # 2) Shift labels by one so model[i] matches seq[i+1]
+    shifted_labels = seq[:, 1:].clone()
+    shifted_mask   = loss_mask[:, 1:]
+    logits         = logits[:, :-1, :]  # align predictions to labels
+
+    # 3) Mark non-target positions with -100 (ignore_index)
+    shifted_labels[shifted_mask == 0] = -100
+
+    # 4) Standard token-level cross-entropy (provides partial-credit gradient)
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+    ce_loss = loss_fn(logits.reshape(-1, logits.size(-1)), shifted_labels.view(-1))
+
+    # 5) Compute the "all-or-nothing" correctness check (non-differentiable indicator)
+    with torch.no_grad():
+        # Argmax over vocab for each token
+        preds = logits.argmax(dim=-1)  # shape: (batch_size, seq_len-1)
+
+        # For each sample & token: check if correct OR label is -100 (masked)
+        token_correct_or_ignored = (preds == shifted_labels) | (shifted_labels == -100)
+        # fully_correct_mask[i] = True iff *every* token in sample i is correct (or -100)
+        fully_correct_mask = token_correct_or_ignored.all(dim=1).float()  # shape: (batch_size,)
+
+    # 6) Auxiliary penalty: alpha if not fully correct, else 0
+    #    e.g. L_aux(i) = alpha * (1 - c_i)
+    #    Then average over the batch
+    aux_loss = alpha * (1.0 - fully_correct_mask).mean()
+
+    # 7) Combine the two losses
+    total_loss = ce_loss + aux_loss
+
+    # 8) Scale by gradient_accumulation_steps
+    total_loss = total_loss / gradient_accumulation_steps
+
+    return total_loss
 def fast_forward_step_hook(seq: torch.Tensor,
                       loss_mask: torch.Tensor,
                       attn_mask: torch.Tensor,

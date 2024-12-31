@@ -190,7 +190,7 @@ def training(config: dict) -> None:
     # load model, tokenizer, dataloader
     # this tokenizer won't match exactly to begin with in terms of size because it is GPT4NeoXTokenizer and I'm using a pythia model. similar size of vocab size but not identical, because there are certain reserved tokens the model doesn't care about
     tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"])
-    
+    config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
     
     if "LORA" in config and config["LORA"]==True:
         # QLORA (quantization parameters)
@@ -198,29 +198,41 @@ def training(config: dict) -> None:
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16  # or torch.float16 depending on your hardware
+            bnb_4bit_compute_dtype=torch.bfloat16
         )
-        # quantize model weights to 4 bits precision to save memory.
+        device_map = {"": f"cuda:{ddp_local_rank}"}
         model = AutoModelForCausalLM.from_pretrained(
             config["model_load_dir"],
             quantization_config=bnb_config,
+            device_map=device_map,   # no "auto"
         )
-        model = prepare_model_for_kbit_training(model) # this will ensure gradients continue to flow through our quantized model.
+
+        # ----------------------------------------
+        # 4) Prepare for K-bit + Insert LoRA
+        # ----------------------------------------
+        model = prepare_model_for_kbit_training(model)  # needed for QLoRA
         target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc_in", "fc_out"]
         lora_config = LoraConfig(
-            r=8,  # Low rank dimension
-            lora_alpha=16,
+            r=160,
+            lora_alpha=32,
             target_modules=target_modules,
             lora_dropout=0.1,
             bias="none",
             task_type="CAUSAL_LM",
         )
-        model = get_peft_model(model, lora_config)     # Inject LoRA adapters
+        model = get_peft_model(model, lora_config)
+        # If your from_pretrained call used device_map=None, you must do model.to(device) here.
+        # If you used device_map={...}, the model might already be on the correct GPU.
+
+        # For safety, you can do a quick pass:
+        # model.to(device)
+
+        model.train()
         model.gradient_checkpointing_enable()
     else:
         model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
-    # model.gradient_checkpointing_enable()
-    model.train()
+        # model.gradient_checkpointing_enable()
+        model.train()
         
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_trainable_params:,}")
@@ -231,8 +243,7 @@ def training(config: dict) -> None:
     # new_positinal_embeddings = current_positional_embeddings[:config["max_context_length"]].clone()
     # model.model.embed_tokens = torch.nn.Embedding(num_embeddings=config["max_context_length"], embedding_dim=model.config.hidden_size) # num embeddings = context length, embedding_dim = embedding dimension
     # model.model.embed_tokens.weight.data = new_positinal_embeddings
-    
-    config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
+
     model.to(device)
 
         
@@ -297,8 +308,10 @@ def training(config: dict) -> None:
 
         # Evaluation and logging every eval_interval steps
         if iter_num % eval_interval == 0 and master_process:
+            logger.info(f"beginning evaluation (iter {iter_num})")
+            estimate_loss(model=model, eval_iters=config["eval_iters"], loader=test_iter, tokenizer=tokenizer,logger=logger, iter_num=iter_num, ctx=ctx)
 
-            
+        if iter_num % config["save_interval"] == 0 and master_process:
             # Checkpoint saving
             if always_save_checkpoint:
                 checkpoint_dir = os.path.join(out_dir, f"ckpt{iter_num}")
@@ -544,14 +557,16 @@ if __name__ == "__main__":
 
     # config_file = "/workspace/searchless_chess/src/config_pthia_hypsweep.yaml"  # config file for wandb hyperparameter sweep
     # config_file = "/workspace/searchless_chess/src/config_pythia.yaml"        # config for pythia training from scratch
-    config_file = "/workspace/searchless_chess/src/config_llama.yaml"         # config for llama training from scratch
+    # config_file = "/workspace/searchless_chess/src/config_llama.yaml"         # config for llama training from scratch
     # config_file = "/workspace/searchless_chess/src/config_pythia_finetune.yaml"
+    config_file = "/workspace/searchless_chess/src/config_llama_qlora.yaml"         # config for fine-tuning llama with LoRA
+    # config_file = "/workspace/searchless_chess/src/config_llama_accuracy.yaml"         # config for llama finetuning with penalty for partially correct moves.
 
     with open(config_file, "r") as stream:
         config = yaml.load(stream=stream, Loader=Loader)
     
     
-    run_with_error_handling(eval_wrapper, config=config, expand_path = "/workspace/searchless_chess/src/Llama/ckpts_new/", log_path=config["log_path"])
-    # run_with_error_handling(training, config=config, log_path=config["log_path"])
+    # run_with_error_handling(eval_wrapper, config=config, expand_path = "/workspace/searchless_chess/src/Llama/ckpts_accuracy/", log_path=config["log_path"])
+    run_with_error_handling(training, config=config, log_path=config["log_path"])
     # run_with_error_handling(sweep_hyperparameters, config=config, log_path=config["log_path"])
     
