@@ -193,6 +193,8 @@ def plot_metrics_from_n_dfs(
 
 ############ plot loss curves of QLoRA and base training
 base_training_start = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/train_3.log", block_size=100)
+base_training_rest = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/train_4.log", block_size=100)
+base_training = pd.concat([base_training_start, base_training_rest], ignore_index=True)
 qlora = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/train_qlora.log", block_size=100)
 print(qlora)
-plot_metrics_from_n_dfs(results_list=[base_training_start, qlora], filename="./Llama/qloraAndBase_plot_accuracy.png", names=["Full Fine Tuning", "QLoRA"], ignore_index=1)
+plot_metrics_from_n_dfs(results_list=[base_training.iloc[:len(qlora)], qlora], filename="./Llama/qloraAndBase_plot_accuracy.png", names=["Full Fine Tuning", "QLoRA"], ignore_index=1)

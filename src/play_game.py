@@ -305,7 +305,7 @@ def get_legal_move(
 
     for attempt in range(max_attempts):
         move_san = player.get_move(
-            board, game_state, min(((attempt / max_attempts) * 1) + 0.001, 0.5)
+            board, game_state, temperature=min(((attempt / max_attempts) * 1) + 0.001, 0.5)
         )
 
         # Sometimes when GPT thinks it's the end of the game, it will just output the result
