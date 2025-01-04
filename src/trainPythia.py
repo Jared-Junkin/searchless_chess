@@ -8,7 +8,6 @@ import math
 import wandb
 from language_data_loader import LlamaLoader
 from config_language import LanguageDataConfig
-from test import decode
 from torch.optim import Adam
 from contextlib import nullcontext
 import yaml
@@ -557,9 +556,9 @@ if __name__ == "__main__":
 
     # config_file = "/workspace/searchless_chess/src/config_pthia_hypsweep.yaml"  # config file for wandb hyperparameter sweep
     # config_file = "/workspace/searchless_chess/src/config_pythia.yaml"        # config for pythia training from scratch
-    # config_file = "/workspace/searchless_chess/src/config_llama.yaml"         # config for llama training from scratch
+    config_file = "/workspace/searchless_chess/src/config_llama.yaml"         # config for llama training from scratch (now this is for 500,000 iters)
     # config_file = "/workspace/searchless_chess/src/config_pythia_finetune.yaml"
-    config_file = "/workspace/searchless_chess/src/config_llama_qlora.yaml"         # config for fine-tuning llama with LoRA
+    # config_file = "/workspace/searchless_chess/src/config_llama_qlora.yaml"         # config for fine-tuning llama with LoRA
     # config_file = "/workspace/searchless_chess/src/config_llama_accuracy.yaml"         # config for llama finetuning with penalty for partially correct moves.
 
     with open(config_file, "r") as stream:

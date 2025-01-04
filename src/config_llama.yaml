@@ -13,7 +13,7 @@ bos_token: "<|begin_of_text|>"
 eot_token: "<|end_of_text|>"
 out_dir: '/workspace/searchless_chess/src/Llama/ckpts_accuracy_full/'
 eval_interval: 5000
-save_interval: 10000
+save_interval: 20000
 log_interval: 10
 eval_iters: 20
 eval_only: False                          # if True, script exits right after the first eval

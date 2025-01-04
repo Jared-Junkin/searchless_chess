@@ -638,19 +638,19 @@ recording_file = "logs/determine.csv"  # default recording file. Because we are 
 if __name__ == "__main__":
 
     ################### play human game with Pythia model
-    stockfish_play_time=0.1
-    num_games=100
-    model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_new_nof2/ckpt208000"
-    player_ones = ["pythia160m_ckpt208000"]
-    player_one_recording_name=player_ones[0]
-    player_one = PythiaPlayer(tokenizer_config_path=model_load_path,
-                                model_config_path=model_load_path,
-                                pad_token="<|padding|>",
-                                eot_token="<|endoftext|>")
+    # stockfish_play_time=0.1
+    # num_games=100
+    # model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_new_nof2/ckpt208000"
+    # player_ones = ["pythia160m_ckpt208000"]
+    # player_one_recording_name=player_ones[0]
+    # player_one = PythiaPlayer(tokenizer_config_path=model_load_path,
+    #                             model_config_path=model_load_path,
+    #                             pad_token="<|padding|>",
+    #                             eot_token="<|endoftext|>")
     
-    player_two_recording_name = "human"
-    player_two = humanPlayer()
-    play_game(player_one, player_two, 1)
+    # player_two_recording_name = "human"
+    # player_two = humanPlayer()
+    # play_game(player_one, player_two, 1)
     
 
     
@@ -701,3 +701,58 @@ if __name__ == "__main__":
     #     player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
     #     play_game(player_one, player_two, num_games)
     
+    
+    ################### play llama 100 games against stockfish agents of varying levels, 50 as white, 50 as  black
+    num_games = 50
+    stockfish_play_time=0.1
+    model_load_path = "/workspace/searchless_chess/src/Llama/ckpts_new/ckpt100000"
+    player_ones = ["llama3.1_ckpt1000000"]
+    player_one_recording_name=player_ones[0]
+    
+    for player in player_ones:
+        for i in range(11):
+            # we get white
+            player_one_recording_name = player
+            player_two_recording_name = "stockfish" + str(i)
+            player_one = PythiaPlayer(tokenizer_config_path=model_load_path,
+                                model_config_path=model_load_path,
+                                pad_token="<|pad|>",
+                                eot_token="<|end_of_text|>",
+                                bos_token="<|begin_of_text|>")
+            player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+            play_game(player_one, player_two, num_games)
+            
+            # now we get black
+            player_two_recording_name = player
+            player_one_recording_name = "stockfish" + str(i)
+            player_one = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+            player_two = PythiaPlayer(tokenizer_config_path=model_load_path,
+                                model_config_path=model_load_path,
+                                pad_token="<|pad|>",
+                                eot_token="<|end_of_text|>",
+                                bos_token="<|begin_of_text|>")
+            play_game(player_one, player_two, num_games)
+
+    ################### play pythia 100 games against stockfish agents of varying levels, 50 as white, 50 as  black
+    model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_new_nof2/ckpt208000"
+    player_ones = ["pythia160m_ckpt208000"]
+    player_one_recording_name=player_ones[0]
+    for player in player_ones:
+        for i in range(11):
+            player_one_recording_name = player
+            player_two_recording_name = "stockfish" + str(i)
+            player_one = PythiaPlayer(tokenizer_config_path=model_load_path,
+                                    model_config_path=model_load_path,
+                                    pad_token="<|padding|>",
+                                    eot_token="<|endoftext|>")
+            player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+            play_game(player_one, player_two, num_games)
+            
+            player_two_recording_name = player
+            player_one_recording_name = "stockfish" + str(i)
+            player_two = PythiaPlayer(tokenizer_config_path=model_load_path,
+                                    model_config_path=model_load_path,
+                                    pad_token="<|padding|>",
+                                    eot_token="<|endoftext|>")
+            player_one = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+            play_game(player_one, player_two, num_games)

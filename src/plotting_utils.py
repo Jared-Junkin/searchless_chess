@@ -98,6 +98,62 @@ def plotSweep(results: dict, save_file_path: str, agent_name: str = "Llama")->No
     plt.tight_layout()
     plt.savefig(save_file_path)
     
+    
+import matplotlib.pyplot as plt
+import numpy as np
+from typing import List
+
+def plotSweep_all(results: List[dict], save_file_path: str, agent_names: List[str] = ["Llama"]) -> None:
+    """
+    Plots a bar chart of the number of wins for each agent against each Stockfish level.
+
+    Args:
+        results (List[dict]): List of dictionaries where each dictionary corresponds to an agent. 
+                              Keys are Stockfish levels and values are tuples (wins, draws, losses).
+        save_file_path (str): Path to save the resulting plot.
+        agent_names (List[str]): List of agent names corresponding to the results.
+    """
+    # Ensure the number of agents matches the results
+    if len(results) != len(agent_names):
+        raise ValueError("The number of results dictionaries must match the number of agent names.")
+
+    # Extract Stockfish levels (assuming all agents have the same levels)
+    stockfish_levels = list(results[0].keys())
+    n_levels = len(stockfish_levels)
+    n_agents = len(agent_names)
+
+    # Data for the plot
+    bar_width = 0.8 / n_agents  # Adjust bar width to fit all agents in each level group
+    x_positions = np.arange(n_levels)  # Base positions for Stockfish levels
+    colors = plt.cm.tab10.colors  # Use a colormap for different agent bars
+
+    plt.figure(figsize=(12, 8))
+    
+    # Plot each agent's results
+    for i, (agent_results, agent_name) in enumerate(zip(results, agent_names)):
+        wins = [agent_results[level][0] for level in stockfish_levels]
+        # Offset bars for each agent
+        plt.bar(
+            x_positions + i * bar_width, 
+            wins, 
+            width=bar_width, 
+            label=agent_name, 
+            color=colors[i % len(colors)]
+        )
+    
+    # Customize the plot
+    plt.title("Agent Wins Against Stockfish Levels", fontsize=16)
+    plt.xlabel("Stockfish Level", fontsize=14)
+    plt.ylabel("Wins out of 100", fontsize=14)
+    plt.xticks(x_positions + bar_width * (n_agents - 1) / 2, stockfish_levels)
+    plt.ylim(0, 100)
+    plt.legend(title="Agents", fontsize=12)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Adjust layout and save the plot
+    plt.tight_layout()
+    plt.savefig(save_file_path)
+
 
 # accepts a dictionary of tuples where each entry represents wins/draws/losses against stockfish level i. estimates elo rating based on this performance.
 def calcELO(results: dict)-> float:
@@ -124,7 +180,7 @@ def calcELO(results: dict)-> float:
             wins = results[opponent][0]
             expected_wins = 1/(1 + 10**((stockfish_ratings[opponent]-start_estimated_rating)/400))
             start_estimated_rating += K_factor * (wins - (N * expected_wins))
-            print(f"estimated rating after {N} matches against {opponent}: {start_estimated_rating}")
+            # print(f"estimated rating after {N} matches against {opponent}: {start_estimated_rating}")
     return start_estimated_rating
 # function to read in n csv files detailing one agent's performance across n stockfish agents. outputs df containing
 def calcOneWinRate(df: pd.DataFrame)->Tuple:
@@ -134,6 +190,35 @@ def calcOneWinRate(df: pd.DataFrame)->Tuple:
     print(f"Results against Stockfish: {wins} wins, {draws} draws, {losses} losses")
     results = (wins, draws, losses)
     return results
+
+def plotratings(ELOs: List[float], models: List[str], savePath: str) -> None:
+    """
+    Plots a bar chart of estimated ELO ratings for different models.
+
+    Args:
+        ELOs (List[float]): List of ELO ratings for the models.
+        models (List[str]): List of model names corresponding to the ELO ratings.
+        savePath (str): Path to save the generated plot.
+    """
+    plt.figure(figsize=(10, 6))
+    
+    # Create the bar chart
+    plt.bar(models, ELOs, color='skyblue', alpha=0.8)
+    
+    # Add titles and labels
+    plt.title("Estimated ELO Ratings of Models", fontsize=14)
+    plt.xlabel("Models", fontsize=12)
+    plt.ylabel("ELO Rating", fontsize=12)
+    
+    # Annotate bars with ELO values
+    for i, elo in enumerate(ELOs):
+        plt.text(i, elo + 5, f'{elo:.0f}', ha='center', fontsize=10)
+    
+    plt.tight_layout()
+    
+    # Save the figure
+    plt.savefig(savePath)
+    print(f"Figure saved to {savePath}")
 
 def plot_prompt_statistics(path_to_prompt_statistics: str, path_to_save_plots: str) -> None:
     """
@@ -213,8 +298,8 @@ if __name__ == "__main__":
     #                saveFilePath="/workspace/searchless_chess/src/Llama/num_moves_hist_cutoff.png")
 
     ################### pythia exposure bias
-    plot_prompt_statistics(path_to_prompt_statistics="/workspace/searchless_chess/src/pythia/pythia_exposure_bias_stats.txt",
-                           path_to_save_plots="/workspace/searchless_chess/src/pythia/exposure_bias_bar_charts.png")
+    # plot_prompt_statistics(path_to_prompt_statistics="/workspace/searchless_chess/src/pythia/pythia_exposure_bias_stats.txt",
+    #                        path_to_save_plots="/workspace/searchless_chess/src/pythia/exposure_bias_bar_charts.png")
     
     ################### llama exposure bias
     # plot_prompt_statistics(path_to_prompt_statistics="/workspace/searchless_chess/src/Llama/llama_exposure_bias_stats.txt",
@@ -236,34 +321,53 @@ if __name__ == "__main__":
     #                        path_to_save_plots="/workspace/searchless_chess/src/Llama/final_vs_baseline.png")
     
     ################### plotting number of wins, draws, losses against stockfish levels and calculating elo for Llama
-    # fileDir = "/workspace/searchless_chess/src/pythia/logs"
-    # # level=0
-    # agent_name = "llama3_1_ckpt1000000"
-    # performance = {}
-    # for level in range(11):
-    #     opponent = "stockfish" + str(level)
-    #     filename = agent_name + "_vs_" + opponent + ".csv"
-    #     fullfile = os.path.join(fileDir, filename)
-    #     df = pd.read_csv(fullfile)
-    #     result = calcOneWinRate(df=df)
-    #     print(f"w/d/l against stockfish level {level}: {result}")
-    #     performance[opponent]=result
-    # calcELO(results = performance)
+    fileDir = "/workspace/searchless_chess/src/pythia/logs"
+    # level=0
+    agent_name = "llama3_1_ckpt1000000"
+    performance = {}
+    for level in range(11):
+        opponent = "stockfish" + str(level)
+        filename = agent_name + "_vs_" + opponent + ".csv"
+        fullfile = os.path.join(fileDir, filename)
+        df = pd.read_csv(fullfile)
+        result = calcOneWinRate(df=df)
+        print(f"w/d/l against stockfish level {level}: {result}")
+        performance[opponent]=result
+    eloLlama = calcELO(results = performance)
     # plotSweep(results=performance, save_file_path="/workspace/searchless_chess/src/Llama/stockfish_results.png")
+    performance_llama=performance
     
     ################### plotting number of wins, draws, losses against stockfish levels and calculating elo for pythia
-    # fileDir = "/workspace/searchless_chess/src/pythia/logs"
-    # # level=0
-    # agent_name = "pythia160m_ckpt208000"
-    # performance = {}
-    # for level in range(11):
-    #     opponent = "stockfish" + str(level)
-    #     filename = agent_name + "_vs_" + opponent + ".csv"
-    #     fullfile = os.path.join(fileDir, filename)
-    #     if os.path.exists(fullfile):
-    #         df = pd.read_csv(fullfile)
-    #         result = calcOneWinRate(df=df)
-    #         print(f"w/d/l against stockfish level {level}: {result}")
-    #         performance[opponent]=result
-    # calcELO(results = performance)
+    fileDir = "/workspace/searchless_chess/src/pythia/logs"
+    # level=0
+    agent_name = "pythia160m_ckpt208000"
+    performance = {}
+    for level in range(11):
+        opponent = "stockfish" + str(level)
+        filename = agent_name + "_vs_" + opponent + ".csv"
+        fullfile = os.path.join(fileDir, filename)
+        if os.path.exists(fullfile):
+            df = pd.read_csv(fullfile)
+            result = calcOneWinRate(df=df)
+            print(f"w/d/l against stockfish level {level}: {result}")
+            performance[opponent]=result
+    eloPythia = calcELO(results = performance)
     # plotSweep(results=performance, save_file_path="/workspace/searchless_chess/src/pythia/stockfish_results.png", agent_name="Pythia-160M")
+    
+    ################### loading in data from karvonen's nanoGPT runs (my training runs on PGN data with his model architecture)
+    fileDir = "/workspace/searchless_chess/src/karvonen_nanoGPT/stockfish_results.txt"
+    df = pd.read_csv(fileDir)
+    d = {f"stockfish{int(df['level'][i])}": (df["wins"][i], df["draws"][i], df["losses"][i]) for i in range(len(df))}
+    eloKarvonen = calcELO(results=d)
+    
+    ################## loading in data from deepmind runs (my training runs iwth deepmind's nanogpt architecture)
+    fileDir="/workspace/searchless_chess/src/deepmind_results/stockfish_results.txt"
+    df = pd.read_csv(fileDir)
+    deepmind = {f"stockfish{int(df['level'][i])}": (df["wins"][i], df["draws"][i], df["losses"][i]) for i in range(len(df))}
+    eloDeepmind = calcELO(results=deepmind)
+    
+    ################### plotting number of wins, draws, losses against stockfish levels and calculating elo for all agents in one bar graph
+    plotSweep_all(results=[deepmind, performance_llama, d, performance], save_file_path="/workspace/searchless_chess/src/stockfish_results_all.png", agent_names=["Deepmind", "Llama (Ours)", "Karvonen", "Pythia (Ours)"])
+    
+    ################### making a bar chart of all the models' elo ratings.
+    plotratings(ELOs=[eloDeepmind, eloLlama, eloKarvonen, eloPythia], models=["Deepmind", "Llama (Ours)", "Karvonen", "Pythia (Ours)"], savePath="/workspace/searchless_chess/src/all_elo_ratings.png")
