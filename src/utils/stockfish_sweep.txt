@@ -1,11 +1,12 @@
-Checkpoint: 0, Wins: 37, Draws: 62, Losses: 1
-Checkpoint: 1, Wins: 29, Draws: 67, Losses: 4
-Checkpoint: 2, Wins: 23, Draws: 70, Losses: 7
-Checkpoint: 3, Wins: 25, Draws: 72, Losses: 3
-Checkpoint: 4, Wins: 12, Draws: 75, Losses: 13
-Checkpoint: 5, Wins: 14, Draws: 72, Losses: 14
-Checkpoint: 6, Wins: 12, Draws: 68, Losses: 20
-Checkpoint: 7, Wins: 8, Draws: 58, Losses: 34
-Checkpoint: 8, Wins: 4, Draws: 54, Losses: 42
-Checkpoint: 9, Wins: 4, Draws: 40, Losses: 56
-Checkpoint: 10, Wins: 1, Draws: 32, Losses: 67
+level,wins,draws,losses
+0,100,0,0
+1,98,0,2
+2,94,0,6
+3,87,0,13
+4,79,1,20
+5,74,3,23
+6,62,3,35
+7,46,9,45
+8,40,5,55
+9,32,7,61
+10,27,10,63

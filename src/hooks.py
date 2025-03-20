@@ -319,14 +319,13 @@ def fast_forward_step_hook_grad(seq: torch.Tensor,
     return total_loss
 def fast_forward_step_hook(seq: torch.Tensor,
                       loss_mask: torch.Tensor,
-                      attn_mask: torch.Tensor,
                       model: AutoModelForCausalLM,
                       gradient_accumulation_steps: int,
                       method: str = "dont_attend_to_prev_answers",
                       attentions: bool = True
                       )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     seq_tmp = seq
-    outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=False)
+    outputs = model(input_ids=seq_tmp, output_attentions=False)
     logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 
     # Shift labels by one
@@ -345,7 +344,6 @@ def fast_forward_step_hook(seq: torch.Tensor,
 # this must be run on the master process
 def eval_hook(seq: torch.Tensor,
                       loss_mask: torch.Tensor,
-                      attn_mask: torch.Tensor,
                       model: AutoModelForCausalLM,
                       )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     seq_tmp = seq # 
@@ -387,7 +385,7 @@ def eval_hook(seq: torch.Tensor,
     # print("Pred 0", generated_tokens)
     ####################################### 
     
-    outputs = model(input_ids=seq_tmp, attention_mask=attn_mask, output_attentions=False)
+    outputs = model(input_ids=seq_tmp, output_attentions=False)
     logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 
     # Shift labels by one
@@ -414,7 +412,7 @@ def eval_hook(seq: torch.Tensor,
     # calculate the mean probability of the chosen move
     chosen_probs = probs[valid_positions, pred[valid_positions]]
     mean_chosen_prob = chosen_probs.mean()
-    return loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob
+    return loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, sequence_accuracy, mean_correct_prob, mean_chosen_prob
 
 
 def forward_step_hook(seq: torch.Tensor,

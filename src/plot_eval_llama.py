@@ -81,14 +81,14 @@ def plot_metrics(result, filename="performance_plot.png", ignore_index: int = 0)
 
     # Plot loss
     axs[0].plot(result.index, result['mean_loss'], marker='o')
-    axs[0].set_title("Mean Loss per Block")
-    axs[0].set_xlabel("Block Index")
+    axs[0].set_title("Mean Loss per 1000 Steps")
+    axs[0].set_xlabel("Step (x1000)")
     axs[0].set_ylabel("Mean Loss")
 
     # Plot time
     axs[1].plot(result.index, result['mean_time'], marker='o', color='orange')
     axs[1].set_title("Mean Time per Block")
-    axs[1].set_xlabel("Block Index")
+    axs[1].set_xlabel("Step (x1000)")
     axs[1].set_ylabel("Mean Time (ms)")
 
     plt.tight_layout()
@@ -119,7 +119,7 @@ def plot_metrics_from_n_dfs(
         return
 
     # Create a figure with 2 subplots for 'mean_loss' and 'mean_time'
-    fig, axs = plt.subplots(2, 1, figsize=(12, 8))
+    fig, axs = plt.subplots(2, 1, figsize=(12, 12))
 
     # Choose a set of distinct colors for each DataFrame.
     # (You can also use e.g. plt.cm.tab10 or any other colormap.)
@@ -160,12 +160,12 @@ def plot_metrics_from_n_dfs(
             )
 
     # Titles and axis labels
-    axs[0].set_title("Mean Loss per Block")
-    axs[0].set_xlabel("Block Index")
+    axs[0].set_title("Mean Loss per 1000 Steps")
+    axs[0].set_xlabel("Step (x1000)")
     axs[0].set_ylabel("Mean Loss")
 
-    axs[1].set_title("Mean Time per Block")
-    axs[1].set_xlabel("Block Index")
+    axs[1].set_title("Mean Time per 1000 Steps")
+    axs[1].set_xlabel("Step (x1000)")
     axs[1].set_ylabel("Mean Time (ms)")
 
     # If we provided any labels, show the legend
@@ -179,10 +179,14 @@ def plot_metrics_from_n_dfs(
     plt.savefig(filename)
     plt.close(fig)
 
+############ all Llama training
+# base_training_start = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/train_3.log", block_size=100)
 # result = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/train_4.log",block_size=100)# block size = 25 means 25 iters will ultimately be averaged together.
 # # result = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/improve_accuracy.log",block_size=100)# block size = 25 means 25 iters will ultimately be averaged together.
-# print(result)
 # # plot_metrics(result=result, filename="./Llama/improve_acc_plot.png", ignore_index=2)
+# result2 = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/full_training_improve_acc.log",block_size=100)
+# result = pd.concat([base_training_start.iloc[1:], result, result2], ignore_index=True)
+# print(result)
 # plot_metrics(result=result,filename="./Llama/metrics_plot_accuracy.png")
 
 ############ plot same loss curve but for QLoRA
@@ -197,4 +201,4 @@ base_training_rest = process_log_file(filepath="/workspace/searchless_chess/src/
 base_training = pd.concat([base_training_start, base_training_rest], ignore_index=True)
 qlora = process_log_file(filepath="/workspace/searchless_chess/src/Llama/logs/train_qlora.log", block_size=100)
 print(qlora)
-plot_metrics_from_n_dfs(results_list=[base_training, qlora], filename="./Llama/qloraAndBase_plot_accuracy.png", names=["Full Fine Tuning", "QLoRA"], ignore_index=1)
+plot_metrics_from_n_dfs(results_list=[base_training.iloc[:len(qlora)], qlora], filename="./Llama/qloraAndBase_plot_accuracy.png", names=["Direct Fine Tuning", "QLoRA"], ignore_index=1)

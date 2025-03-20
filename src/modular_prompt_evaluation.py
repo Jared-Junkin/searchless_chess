@@ -140,14 +140,12 @@ def quantify_exposure_bias(    model: AutoModelForCausalLM,
         # Iterate over all batches we've decided to load
         for i in range(num_batches):
             print(f"starting batch {i}")
-            seq, attn_mask, loss_mask, fen_batch, best_move_batch = next(data_iter)
+            seq, loss_mask, fen_batch, best_move_batch = next(data_iter)
             with torch.no_grad():
                 seq=seq.to(model.device)
-                attn_mask = attn_mask.to(model.device)
                 loss_mask = loss_mask.to(model.device)
-                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = eval_hook(seq=seq,
+                loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, sequence_accuracy, mean_correct_prob, mean_chosen_prob = eval_hook(seq=seq,
                                                                             loss_mask=loss_mask,
-                                                                            attn_mask=attn_mask,
                                                                             model=model)
                 # logits_beam, indices_beam = beam_search(logits=logits, loss_mask=loss_mask[:, 1:])
                 token_indices = torch.nonzero(shifted_mask)  # Indices of tokens we care about
@@ -167,7 +165,7 @@ def quantify_exposure_bias(    model: AutoModelForCausalLM,
             for fen, best_move in zip(fen_batch, best_move_batch):
                 output = grouped_predicted_tokens[i]
                 cutoff = int(torch.where(loss_mask[i])[0][0])
-                outputs = model.generate(input_ids=seq[i][:cutoff].unsqueeze(0), attention_mask=attn_mask[i][:cutoff].unsqueeze(0), max_length=cutoff+7, pad_token_id=pad_token_id)
+                outputs = model.generate(input_ids=seq[i][:cutoff].unsqueeze(0), max_length=cutoff+7, pad_token_id=pad_token_id)
                 generated_output = tokenizer.decode(outputs[0][torch.where(loss_mask[i])[0][:-1]])#stripping out endoftextpad at end
                 print(f"best move: {best_move}, output: {output}, generated_output: {generated_output}")
                 # tokens, move_probs = getBeamsFromMatrix(probs=logits_beam[i], indices=indices_beam[i], num_beams=5)
@@ -355,11 +353,16 @@ def prompt_evaluation(
         print(f"Statistics saved to {file_path}")
 
 if __name__ == "__main__":
+    # new method with simpler tokenizer. 
+    model_load_path = "./Llama/ckpts_smallPrompt/ckpt55000"
+    model_name = "./Llama/ckpts_accuracy_full/ckpt55000"
+    config_file = "/workspace/searchless_chess/src/confi_llama_smallPrompt.yaml"
+    
+    # # config_file = "/workspace/searchless_chess/src/config_llama.yaml"
+    # model_load_path = "./Llama/ckpts_accuracy_full/ckpt40000"
+    # model_name = "./Llama/ckpts_accuracy_full/ckpt40000"
     # config_file = "/workspace/searchless_chess/src/config_llama.yaml"
-    model_load_path = "./Llama/ckpts_new/ckpt100000"
-    model_name = "./Llama/ckpts_new/ckpt100000"
-    config_file = "/workspace/searchless_chess/src/config_llama.yaml"
-    # model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_new_nof2/ckpt108000"
+    # # model_load_path = "/workspace/searchless_chess/src/pythia/ckpts_new_nof2/ckpt108000"
     
     # model_name = "pythia-160m/no_f2decay_ckpt108000"
     with open(config_file, "r") as stream:
@@ -388,13 +391,13 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_load_path)
     model.to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_load_path)
-    data_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="train")
+    data_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="train", debug=True)
     if ddp:
         init_process_group(backend=config['backend'])
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}['bfloat16']
     ctx = nullcontext() if config['device_type'] == 'cuda:0' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
     with ctx if ctx else torch.no_grad():  # Use ctx if provided, else default no_grad context
         # prompt_evaluation(model, data_iter,tokenizer=tokenizer, model_name=model_name, device=device, strip_away_characters=True, num_batches=20)
-        quantify_exposure_bias(model, data_iter,tokenizer=tokenizer, model_name=model_name, device=device, strip_away_characters=True, num_batches=20,file_path="./pythia/exposure_bias.txt")
+        quantify_exposure_bias(model, data_iter,tokenizer=tokenizer, model_name=model_name, device=device, strip_away_characters=True, num_batches=100,file_path="./Llama/study_improvements.txt")
     if ddp:
         destroy_process_group()

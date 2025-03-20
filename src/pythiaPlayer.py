@@ -257,6 +257,331 @@ class PythiaPlayer:
         return best_move
     
     
+
+
+class SimpleLlamaPlayer:
+    def __init__(self, 
+                 tokenizer_config_path: str, 
+                 model_config_path: str, 
+                 pad_token: str = "<|padding|>",
+                 eot_token: str = "<|endoftext|>",
+                 bos_token: str = None,
+                 draws_okay: bool = False, 
+                 prompt_components: Optional[List[str]]=None
+    ) -> None:
+        # this MUST be the same prompt the model was fine-tuned on (I assume. I actually haven't tested how resilient it is to different prompts)
+        if not prompt_components:
+            # default prompt
+            prompt_components = [
+                "FEN: ",
+                "Best Move: "                                                                                                   
+            ]
+        # 
+        if len(prompt_components)!=2:
+            raise ValueError(f"Expected prompt_components to have a length of 3, but got len {len(prompt_components)}.")
+        
+        self.model = AutoModelForCausalLM.from_pretrained(model_config_path)
+        self.model_name = model_config_path
+        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_config_path)
+        if bos_token:
+            self.bos_token_id = [self._tokenizer.convert_tokens_to_ids(bos_token)]
+        else:
+            self.bos_token_id = None
+        self.pad_token_id = self._tokenizer.convert_tokens_to_ids(pad_token)
+        self.eot_token_id = self._tokenizer.convert_tokens_to_ids(eot_token)
+        self.helper = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+        self.draws_okay = draws_okay
+        self._pretokenized_prompt = []
+        for component in prompt_components:
+            token_ids = self._tokenizer(component, add_special_tokens=False)["input_ids"]
+            self._pretokenized_prompt.append(np.array(token_ids, dtype=np.int32))
+            
+        static_prompt_length = sum(len(comp) for comp in self._pretokenized_prompt) 
+        max_encoding_length = 6     # hard coding for now. what it was for training
+        dynammic_prompt_length = max_encoding_length * 80 # (empircally, there aren't any board states in dataset with more legal moves than this)                                 # max length needed for dynammic prompt (there will never by more than 128 legal moves)
+        total_prompt_length = static_prompt_length + dynammic_prompt_length
+        print(f"total prompt length is {total_prompt_length}")
+        pad_token_id = self._tokenizer.convert_tokens_to_ids("<|pad|>")                         # get token id of pad character
+        self._predefined_array = np.full(                                                    # This array is going to be our prompty. pre-definining it so we don't have ot initialize each time
+            (total_prompt_length,), pad_token_id, dtype=np.int32
+        )
+        self._CHARACTERS = [
+            '0',
+            '1',
+            '2',
+            '3',
+            '4',
+            '5',
+            '6',
+            '7',
+            '8',
+            '9',
+            'a',
+            'b',
+            'c',
+            'd',
+            'e',
+            'f',
+            'g',
+            'h',
+            'p',
+            'n',
+            'r',
+            'k',
+            'q',
+            'P',
+            'B',
+            'N',
+            'R',
+            'Q',
+            'K',
+            'w',
+            '.',
+            ' '
+        ]
+        self.encodings = {key: self._tokenizer.convert_tokens_to_ids(key) for key in self._CHARACTERS}
+        all_moves = utils._compute_all_possible_actions()
+        all_moves = list(all_moves[0].keys())
+        self.all_move_encodings = {}
+        for move in all_moves:
+            encoding = []
+            for char in move: 
+                encoding.append(self.encodings[char])
+            self.all_move_encodings[move] = encoding
+        self.comma_space = self._tokenizer.encode(", ")
+    def _tokenize(self, fen: str, legal_moves: List[str])->np.ndarray:
+
+        
+        spaces_characters = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
+
+        # extract relevant board informatino from fen
+        board, side, castling, en_passant, halfmoves_last, fullmoves = fen.split(' ')
+        board = board.replace('/', '')
+        board = side + board
+
+        indices = list()
+
+
+
+        # replace integer representations of empty space with dots (5 -> .....)
+        for char in board:
+            if char in spaces_characters:
+                indices.extend(int(char) * [self.encodings['.']])
+            else:
+                indices.append(self.encodings[char])
+        # if no one can castle, make castling ....
+        if castling == '-':
+            indices.extend(4 * [self.encodings['.']])
+        # otherwise, pad castling to be four characters exactly.
+        else:
+            for char in castling:
+                indices.append(self.encodings[char])
+            # Padding castling to have exactly 4 characters.
+            if len(castling) < 4:
+                indices.extend((4 - len(castling)) * [self.encodings['.']])
+
+        # if en passant isn't possible, make it .. otherwise, it will be e3 (for example). the square where en passant is possible.
+        if en_passant == '-':
+            indices.extend(2 * [self.encodings['.']])
+        else:
+            # En passant is a square like 'e3'.
+            for char in en_passant:
+                indices.append(self.encodings[char])
+
+        # Three digits for halfmoves (since last capture) is enough since the game
+        # ends at 50. AI doesn't care about halfmoves. just noise
+        halfmoves_last += '.' * (3 - len(halfmoves_last))
+        indices.extend([self.encodings[x] for x in halfmoves_last])
+
+        # AI also doesn't care about fullmoves
+        # Three digits for full moves is enough (no game lasts longer than 999
+        # moves).
+        fullmoves += '.' * (3 - len(fullmoves))
+        indices.extend([self.encodings[x] for x in fullmoves])
+        
+        # add in legal moves to prompt.
+        legal_tokens = []
+        for move in legal_moves:
+            legal_tokens.extend(self.all_move_encodings[move])
+            legal_tokens.extend(self.comma_space) # add ", " to help the LLM with readability.
+            
+
+        # assemble our final prompt
+        if self.bos_token_id:
+            prompt_tokens = np.concatenate([
+                self.bos_token_id,
+                self._pretokenized_prompt[0],
+                indices,
+                self._pretokenized_prompt[1]
+            ])
+        else:
+            prompt_tokens = np.concatenate([
+                self._pretokenized_prompt[0],
+                indices,
+                self._pretokenized_prompt[1]
+            ])
+        
+        return prompt_tokens
+    
+    def get_config(self) -> dict:
+        return {"model": self.model_name}
+    # get a move from the agent and return it in the proper format
+    def get_move(self, board: chess.Board, game_state: str, temperature: float) -> str:
+        if self.draws_okay:
+            completion = self.get_response(board=board, temperature=temperature)
+            # info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=5)
+            # best_move_san = info[0]['pv'][0].uci()
+            # if completion == best_move_san:
+            #     print(f"top stockfish move played: {completion}")
+            return completion
+        else:
+            #
+            
+            
+            # if victory is certain and the bot is going to draw because of FEN, play top stockfish move
+            # note that if min_wins (out of 1000 estimated according to stockfish) is less than 990, bot is on its own
+            # so this won't catch forced draws. Just draws where it's almost guaranteed to win
+            info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=5)
+            isM1 = info[0]["score"].relative.mate() == 1 if info and info[0]["score"].relative.mate() is not None else False
+            best_move_san = info[0]['pv'][0].uci()
+            min_wins = float('Inf')
+            for variant in range(len(info)):
+                winsDrawsLosses = info[variant]['score'].wdl()
+                min_wins = min(min_wins, winsDrawsLosses.relative.wins)
+
+                # write the board position to a file. 
+            if min_wins>990: # if greater than 99% chance of winning from all top 5 moves
+                print(f"min_win {min_wins/1000} across best 5 moves is above 99%. Letting stockfish finish game")
+                
+                
+                
+                if isM1:
+                    print("hello")
+                    model_best_move, stockfish_best_move, model_best_move_prob, stockfish_best_move_prob = self.get_response(board=board, temperature=temperature, debug=True)
+                    with open("./matesjared.txt", 'a') as f:
+                        # fen, stokcfish move, model move, stockfish move prob, model move prob
+                        f.write(f"{board.fen()},{stockfish_best_move},{model_best_move},{stockfish_best_move_prob},{model_best_move_prob}\n")
+                    f.close()
+                return best_move_san
+            
+        
+            completion = self.get_response(board=board, temperature=temperature)
+            
+            return completion # just removing this because rightnow my decoder can only handle the most likely move.
+        
+
+    def get_response(self, board: chess.Board, temperature: float, debug: bool = False) -> str:
+        # if debug:
+            # get fen position
+            # feed fen position through model autoregressively to get what LLM thinks best move is
+                # for i in range(output length)
+                    # logits = model(inputs)
+                    # find most likely next token
+                    # update traj prob with this tokens prob
+                    # append this token to end of answer
+            # now feed stockfish position through model autoregressively to get its probability
+                # for i in range(stockfish move + EOS)
+                    # feed in input
+                    # get probability of stockfish_token_i (regardless of if it was most likely)
+                    # update stockfish traj prob
+                    # append stockfish token to input ids
+                    #
+            # return model move, stockfish move, model prob, stockfish prob
+        
+        if debug:
+            # get fen
+            fen = board.fen()
+            
+            # tokenize fen
+            legal_moves = [str(m) for m in board.legal_moves] # I don't think this actually gets used
+            input_ids = torch.tensor(self._tokenize(fen=fen, legal_moves=legal_moves)).unsqueeze(0).to(self.model.device)
+            
+            
+            # simulate autoregressive generation by iteratively passing in responses
+            trajectory_prob = 1.0
+            best_move_tokens = []
+            with torch.no_grad():
+                for _ in range(7):
+                    # generate outputs
+                    outputs = self.model(input_ids)
+                    #input_ids here has shape [1x86] = [B, T]
+                    # get logits from outputs
+                    logits = outputs[0][:, -1, :]
+                    # get the probs from the logits
+                    probs = F.softmax(logits, dim=-1)
+                    # sample or take argmax depending on whether we're doing temperature based stochastic sampling
+                    if temperature > 0:
+                        top_token = torch.tensor(torch.multinomial(probs, num_samples=1).item())
+                    else:
+                        top_token = torch.tensor(torch.argmax(probs))
+                
+                    # get prob of logit chosen
+                    p_i = probs[0,top_token]
+                    trajectory_prob*=p_i
+                    
+                    # add to path
+                    best_move_tokens.append(top_token)
+
+                    input_ids = torch.cat((input_ids, top_token.unsqueeze(0).unsqueeze(1)), dim=-1)
+                    # model("jared is ") = "25"
+                    # model("jared is 25")
+                    if top_token == self.eot_token_id:
+                        break
+            
+            info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=5)
+            best_move_san = info[0]['pv'][0].uci()
+            best_move_san_prob = 1.0
+            # now we need to get the model's probability for the best engine move
+            input_ids = torch.tensor(self._tokenize(fen=fen, legal_moves=legal_moves)).unsqueeze(0).to(self.model.device)
+            # convert this into tokens
+            best_move_san = list(best_move_san)
+            stockfish_move_tokens= self._tokenizer.convert_tokens_to_ids(best_move_san)
+            stockfish_move_tokens.append(128001)
+            with torch.no_grad():
+                for token in stockfish_move_tokens:
+                    outputs = self.model(input_ids)
+                    logits = outputs.logits[:, -1, :]
+                    probs = F.softmax(logits, dim=-1)
+                    best_move_san_prob *= probs[0, token].item()
+                    
+                    input_ids = torch.cat((input_ids, torch.tensor(token).unsqueeze(0).unsqueeze(1)), dim=-1)
+            
+                    
+                # we need to simulate while using model because we have to output the logits directly so we can use them to calculate the probabilities
+            # tokenize chosen move
+            # get top stockfish move
+            # tokenize top stokcfish move
+            # get probabilities associated with each logit
+
+            return self._tokenizer.decode(best_move_tokens), self._tokenizer.decode(stockfish_move_tokens), float(trajectory_prob), best_move_san_prob 
+            # model's best move, stockfish best move, model best move prob, stockfish best move prob
+
+
+        else:
+            
+            fen = board.fen()
+            legal_moves = [str(m) for m in board.legal_moves]
+            input_ids = torch.tensor(self._tokenize(fen=fen, legal_moves=legal_moves)).unsqueeze(0).to(self.model.device)
+
+            
+            # get best move
+            outputs = self.model.generate(input_ids=input_ids, 
+                                        max_length=input_ids.shape[1] + 7, 
+                                        pad_token_id=self.pad_token_id, 
+                                        do_sample = True, 
+                                        temperature=temperature)
+            target_tokens = outputs[0][input_ids.shape[1]:]
+            target_tokens = target_tokens[target_tokens != self.eot_token_id] # strip away "<|endoftext|>"
+            target_tokens = target_tokens[target_tokens != self.pad_token_id] # strip away "<|padding|>"
+            
+            best_move = self._tokenizer.decode(target_tokens)
+            info = self.helper.analyse(board, chess.engine.Limit(depth=10), multipv=5)
+            best_move_san = info[0]['pv'][0].uci()
+            if best_move == best_move_san:
+                print(f"top stockfish move played: {best_move}")
+                    
+            return best_move
+
 class NanoGptPlayer:
     def __init__(
         self,

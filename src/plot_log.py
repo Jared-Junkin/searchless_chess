@@ -85,7 +85,6 @@ def plot_metrics(result, filename: str = "performance.png"):
     plt.savefig(filename)
 # Example usage:
 filepath = "/workspace/searchless_chess/src/Llama/logs/train_3.log"
-# filepath = 'path_to_your_logfile.log'
 result = process_log_file(filepath)
 # Display all rows
 pd.set_option('display.max_rows', None)

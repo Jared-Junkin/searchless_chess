@@ -1,0 +1,48 @@
+{
+    "employees": [
+        {
+            "id": 1,
+            "name": "Alice Johnson",
+            "department": {
+                "name": "Engineering",
+                "location": "Building A"
+            },
+            "projects": [
+                {"project_id": 101, "name": "Project X", "status": "completed"},
+                {"project_id": 102, "name": "Project Y", "status": "ongoing"}
+            ],
+            "contact": {
+                "email": "alice.johnson@example.com",
+                "phone": "123-456-7890"
+            }
+        },
+        {
+            "id": 2,
+            "name": "Bob Smith",
+            "department": {
+                "name": "Marketing",
+                "location": "Building B"
+            },
+            "projects": [
+                {"project_id": 103, "name": "Project Z", "status": "completed"}
+            ],
+            "contact": {
+                "email": "bob.smith@example.com",
+                "phone": "987-654-3210"
+            }
+        },
+        {
+            "id": 3,
+            "name": "Charlie Davis",
+            "department": {
+                "name": "Sales",
+                "location": "Building C"
+            },
+            "projects": [],
+            "contact": {
+                "email": "charlie.davis@example.com",
+                "phone": "555-123-4567"
+            }
+        }
+    ]
+}

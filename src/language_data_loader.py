@@ -262,16 +262,30 @@ class BagDataset(Dataset):
         return sequence, attn, loss, fen, move
 
 # same thing except we don't pass list of legal moves in 
-class simpleBagDataset(BagDataset):
-    def __init__(self, data_source, tokenizer, tokenizer_save_path, prompt_components = None, pad_token = "<|padding|>", eot_token = "<|endoftext|>"):
-        
+
+class SimpleBagDataset(Dataset):
+    def __init__(self, 
+                 data_source: Any, 
+                 tokenizer: PreTrainedTokenizer, 
+                 tokenizer_save_path: str, 
+                 debug: bool = False,
+                 prompt_components: Optional[List[str]]=None, 
+                 bos_token: str = None,
+                 pad_token: str = "<|padding|>",
+                 eot_token: str = "<|endoftext|>") -> None:
+        self.debug = debug
         if not prompt_components:
-            self.prompt_components = [
-                "You are a chess grandmaster. This is the board position in FEN notation: ",   # fen comes after this                                                                                                            # legal moves comes after this
-                "Which of these is the best move? Best move: "                                       # best move comes after this.     
+            # default prompt
+            # prompt_components = [
+            #     "You are a chess grandmaster. This is the board position in FEN notation: ",   # fen comes after this                                                                                                        # legal moves comes after this
+            #     "What is the best move? Best move: "                                       # best move comes after this.     
                 
+            # ]
+            prompt_components = [
+                "FEN: ",
+                "Best Move: "                                                                                                   
             ]
-        assert len(self.prompt_components)==2
+            
         self._CHARACTERS = [
             '0',
             '1',
@@ -308,19 +322,30 @@ class simpleBagDataset(BagDataset):
         ]
         self.encodings = {key: tokenizer.convert_tokens_to_ids(key) for key in self._CHARACTERS}
         self.encodings[pad_token] = tokenizer.convert_tokens_to_ids(pad_token)
-        self.comma_space = tokenizer.encode(", ")
+        self.comma_space = tokenizer.encode(", ", add_special_tokens=False)
+        self._board = chess.Board()
         self._tokenizer = tokenizer
-        self._pretokenized_prompt = [tokenizer.encode(comp) for comp in self.prompt_components]
+        self._pretokenized_prompt = [tokenizer.encode(comp, add_special_tokens=False) for comp in prompt_components]
         
         
         # calculate buffer size
-        self._SEQUENCE_LENGTH=77 + sum([len(prompt) for prompt in self._pretokenized_prompt]) + 5 + 1 # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
-        # +5 for max length of move. +1 for eot token
+        self._SEQUENCE_LENGTH=77 + 6 + sum([len(prompt) for prompt in self._pretokenized_prompt]) # assuming we'll never have more than 50 legal moves, and each move takes up 5 pieces.
+        
+        
+        # self._SEQUENCE_LENGTH=77+5+sum([len(prompt) for prompt in self._pretokenized_prompt])
+        
+        
         self.data_source = data_source # required data source object we'll sample from
         self._move_encodings = {}
+        if bos_token:
+            self.bos_token_id = [tokenizer.convert_tokens_to_ids(bos_token)]
+            self._SEQUENCE_LENGTH += 1 # add 1 extra spot for bos token if it exists.
+        else:
+            self.bos_token_id=None
+            
         self.eot_id = [tokenizer.convert_tokens_to_ids(eot_token)] # end of text token to put at end.
 
-        pad_token_id = tokenizer.convert_tokens_to_ids(pad_token)                         # get token id of pad character
+        pad_token_id = [tokenizer.convert_tokens_to_ids(pad_token)]                         # get token id of pad character
         self._predefined_array = np.full(                                                    # This array is going to be our prompty. pre-definining it so we don't have ot initialize each time
             (self._SEQUENCE_LENGTH,), pad_token_id, dtype=np.int32
         )
@@ -330,14 +355,22 @@ class simpleBagDataset(BagDataset):
             dtype=bool
         )
         
-        self._attn_mask: np.ndarray = np.full(
-            shape=(self._SEQUENCE_LENGTH,),
-            fill_value=False,
-            dtype=bool
-        )
         
+        self._last_fen = None
+        self._last_best_move = None
+        all_moves = utils._compute_all_possible_actions()
+        all_moves = list(all_moves[0].keys())
+        self.all_move_encodings = {}
+        for move in all_moves:
+            encoding = []
+            for char in move: 
+                encoding.append(self.encodings[char])
+            self.all_move_encodings[move] = encoding
+        # print("hello")
 
-    def _tokenize(self, fen: str, move: SyntaxError)->Tuple[np.ndarray, np.ndarray]:
+
+        
+    def _tokenize(self, fen: str, move: str)->Tuple[np.ndarray, np.ndarray]:
 
         
         spaces_characters = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
@@ -392,30 +425,35 @@ class simpleBagDataset(BagDataset):
         for char in move:
             best_move.append(self.encodings[char])
             # set up loss mask 
-        # if len(move)==5:
-        #     print("hello")
-        
+
+        # add in legal moves to prompt.
+        self._board.set_fen(fen=fen)
+        legal_tokens = []
+        legal_moves = [str(m) for m in self._board.legal_moves]
+        for move in legal_moves:
+            legal_tokens.extend(self.all_move_encodings[move])
+            legal_tokens.extend(self.comma_space) # add ", " to help the LLM with readability.
             
         # assemble our final prompt
-        prompt_tokens = np.concatenate([
-            self._pretokenized_prompt[0],
-            indices,
-            self._pretokenized_prompt[1],
-            best_move,
-            self.eot_id
-        ])
-        
+        if self.bos_token_id:
+            prompt_tokens = np.concatenate([
+                self.bos_token_id,
+                self._pretokenized_prompt[0],
+                indices,
+                self._pretokenized_prompt[1],
+                best_move,
+                self.eot_id
+            ])
+        else:
+            raise NotImplementedError(f"SimpleBagDataset only implemented for Llama. self.bos_token_id required.")
         # define objects we're going to return 
         predefined_array = np.copy(self._predefined_array)
-        attn_mask = np.copy(self._attn_mask)
         loss_mask = np.copy(self._loss_mask)
         
         # copy prompt into predefined array
         tokens_to_copy = min(len(prompt_tokens), len(predefined_array))
         predefined_array[:tokens_to_copy] = prompt_tokens[:tokens_to_copy]
         
-        # set the model only to attend to non-padding tokens.
-        attn_mask[:tokens_to_copy] = True
 
         
         # make sure loss mask aligns with tokens we want to predict
@@ -425,12 +463,32 @@ class simpleBagDataset(BagDataset):
         assert len(predefined_array) == self._SEQUENCE_LENGTH
 
 
-        return predefined_array, attn_mask, loss_mask
+        return predefined_array, loss_mask
     
-    def __len__(self):
-        return super().__len__()
-    def __getitem__(self, idx):
-        return super().__getitem__(idx)
+    
+    # return the fen and move associated with the most recent element processed (hacky right now, so it won't account for batching properly)
+    def getFen(self)->Tuple[str, str]:
+        return self._last_fen, self._last_best_move
+    
+    def __len__(self) -> int:
+        return len(self.data_source)
+
+    # retrieve single sample from dataset
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        element: bytes = self.data_source[idx]
+        fen, move = constants.CODERS['behavioral_cloning'].decode(element)
+        # setting these in here for debug purposes (temporary)
+        self._last_fen = fen
+        self._last_best_move = move
+        sequence, loss = self._tokenize(fen, move)
+        
+        # Convert to PyTorch tensors with correct dtypes
+        sequence = torch.tensor(sequence, dtype=torch.long)
+        loss = torch.tensor(loss, dtype=torch.bool)
+        if self.debug: 
+            return sequence, loss, fen, move
+        else:
+            return sequence, loss
     
  
     
@@ -442,8 +500,9 @@ class LlamaLoader:
                  split: str,
                  data_dir: str = "/workspace/searchless_chess/data",
                  data_source_name: str="behavioral_cloning_data.bag",
+                 debug: bool = False
                  )->None:
-        
+        self.debug = debug
         world_size = training_config["ddp_world_size"]
         rank = training_config["ddp_local_rank"]
         config = LanguageDataConfig(
@@ -474,13 +533,14 @@ class LlamaLoader:
             num_records = len(data_source)
         if "bos_token" in training_config:
             # llama expects a bos token at the start of its inputs while pythia does not.
-            dataset: Dataset = BagDataset(tokenizer=config.tokenizer, 
+            dataset: Dataset = SimpleBagDataset(tokenizer=config.tokenizer, 
                                         tokenizer_save_path=config.tokenizer_save_path,
                                         data_source=data_source,
                                         pad_token=training_config["pad_token"],
                                         eot_token=training_config["eot_token"],
                                         prompt_components=None,
-                                        bos_token=training_config["bos_token"]
+                                        bos_token=training_config["bos_token"],
+                                        debug=self.debug
                                         )
         else:
             dataset: Dataset = BagDataset(tokenizer=config.tokenizer, 
@@ -506,8 +566,11 @@ class LlamaLoader:
             batch_size=config.batch_size,
             sampler=sampler,
             num_workers=config.worker_count,
-            pin_memory=True,
-            drop_last=True
+            pin_memory=True, # what does this do? speeds up data transfer between CPU and GPU
+            # specifically by moving data to pinned (page-locked) memory
+            # before transfer to GPU
+            drop_last=True # what does this do? ensures each batch has exactly batch_size samples
+            # specifically by discarding last batch if smaller than batch_size
         )
             
         self._dataset = dataset
@@ -525,14 +588,24 @@ class LlamaLoader:
     def __len__(self)->int:
         return len(self._loader)
     def __next__(self)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        try:
-            seq, attn_mask, loss_mask, fen, move = next(self._loader_iter)
-        except StopIteration:
-            # TODO: log that you're starting over for loader_name 
-            self._loader_iter = iter(self._loader)
-            seq, attn_mask, loss_mask, fen, move = next(self._loader_iter)
+        if self.debug:
+            try:
+                sequence, loss, fen_batch, best_move_batch= next(self._loader_iter)
+            except StopIteration:
+                # TODO: log that you're starting over for loader_name 
+                self._loader_iter = iter(self._loader)
+                sequence, loss, fen_batch, best_move_batch = next(self._loader_iter)
 
-        return seq, attn_mask, loss_mask, fen, move
+            return sequence,loss, fen_batch, best_move_batch
+        else:
+            try:
+                sequence, loss = next(self._loader_iter)
+            except StopIteration:
+                # TODO: log that you're starting over for loader_name 
+                self._loader_iter = iter(self._loader)
+                sequence, loss = next(self._loader_iter)
+
+            return sequence,loss
 
             
 
