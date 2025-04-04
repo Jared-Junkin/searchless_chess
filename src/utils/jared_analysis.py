@@ -67,12 +67,12 @@ if __name__ == "__main__":
         f.close()
     
     for i in range(11):
-        filepath = "../pythia/logs/llama3_1repeat50000_vs_stockfish" + str(i) + ".csv"
+        filepath = "../Llama/logs/llama3_1repeat95000_vs_stockfish" + str(i) + ".csv"
         df = pd.read_csv(filepath)
         white_perf = calcWinRate(df, stockfish_level=i, color="white")
         
         
-        blackFilepath = "../pythia/logs/stockfish" + str(i) + "_vs_llama3_1repeat50000.csv"
+        blackFilepath = "../Llama/logs/stockfish" + str(i) + "_vs_llama3_1repeat95000.csv"
         df = pd.read_csv(blackFilepath)
         black_perf = calcWinRate(df, stockfish_level=i, color="black")
         

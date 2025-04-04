@@ -685,7 +685,7 @@ if __name__ == "__main__":
     # df = pd.read_csv(fileDir)
     # performance_llama ={f"stockfish{int(df['level'][i])}": (df["wins"][i], df["draws"][i], df["losses"][i]) for i in range(len(df))}
     
-    # ################### plotting number of wins, draws, losses against stockfish levels and calculating elo for pythia
+    # # ################### plotting number of wins, draws, losses against stockfish levels and calculating elo for pythia
     # fileDir = "/workspace/searchless_chess/src/pythia/logs"
     # # level=0
     # agent_name = "pythia160m_ckpt208000"
@@ -718,30 +718,30 @@ if __name__ == "__main__":
     
     
     
-    # # # ################### loading in data from karvonen's nanoGPT runs (my training runs on PGN data with his model architecture)
+    # # # # ################### loading in data from karvonen's nanoGPT runs (my training runs on PGN data with his model architecture)
     # fileDir = "/workspace/searchless_chess/src/karvonen_nanoGPT/stockfish_results.txt"
     # df = pd.read_csv(fileDir)
     # d = {f"stockfish{int(df['level'][i])}": (df["wins"][i], df["draws"][i], df["losses"][i]) for i in range(len(df))}
     # eloKarvonen = calcELO(results=d)
     # print(eloKarvonen)
     
-    # # # ################## loading in data from deepmind runs (my training runs iwth deepmind's nanogpt architecture)
-    # fileDir="/workspace/searchless_chess/src/deepmind_results/stockfish_results.txt"
+    # # # # ################## loading in data from deepmind runs (my training runs iwth deepmind's nanogpt architecture)
+    # fileDir="/workspace/searchless_chess/src/deepmind_results/stockfish_final.txt"
     # df = pd.read_csv(fileDir)
     # winLossDrawGraph(df=df, savePath="./deepmind_results/wld.png", agent_name="Deepmind")
     # deepmind = {f"stockfish{int(df['level'][i])}": (df["wins"][i], df["draws"][i], df["losses"][i]) for i in range(len(df))}
     # eloDeepmind = calcELO(results=deepmind)
     # print(f"deepmind elo is {eloDeepmind}")
     
-    # # # ################### plotting number of wins, draws, losses against stockfish levels and calculating elo for all agents in one bar graph
-    # plotSweep_all(results=[deepmind, performance_llama, d, performance], save_file_path="/workspace/searchless_chess/src/stockfish_results_all.png", agent_names=["Ruoss et. al", "Llama (Ours)", "Karvonen", "Pythia (Ours)"], gray_bars=["Ruoss et. al", "Karvonen"])
+    # # # # ################### plotting number of wins, draws, losses against stockfish levels and calculating elo for all agents in one bar graph
+    # plotSweep_all(results=[performance_llama, deepmind, d, performance], save_file_path="/workspace/searchless_chess/src/stockfish_results_all.png", agent_names=["Llama (Ours)", "Ruoss et. al", "Karvonen", "Pythia (Ours)"], gray_bars=["Ruoss et. al", "Karvonen"])
     
     # ################### making a bar chart of all the models' elo ratings.
     # plotratings(ELOs=[2910, 2579, 2118, 1306], models=["Deepmind", "Llama (Ours)", "Karvonen (White Pieces Only)", "Pythia (Ours)"], savePath="/workspace/searchless_chess/src/all_elo_ratings.png")
     
     
     
-    ################### Making w/l/d bar graph across stockfish levels for deepmind
+    # ################### Making w/l/d bar graph across stockfish levels for deepmind
     # df = pd.read_csv("./deepmind_results/stockfish_final.txt")
     # winLossDrawGraph(df=df, savePath="./deepmind_results/wld.png", agent_name = "Ruoss et. al nanoGPT")
     
