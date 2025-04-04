@@ -58,7 +58,6 @@ _CHARACTERS_INDEX = {letter: index for index, letter in enumerate(_CHARACTERS)}
 _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
 SEQUENCE_LENGTH = 77
 
-
 def tokenize(fen: str) -> jtp.Int32[jtp.Array, 'T']:
   """Returns an array of tokens from a fen string.
 

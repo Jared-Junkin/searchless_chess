@@ -72,6 +72,18 @@ class ConvertToSequence(pygrain.MapTransform, abc.ABC):
   def _sequence_length(self) -> int:
     raise NotImplementedError()
 
+class ConvertBehavioralCloningDataToStr(ConvertToSequence):
+  @property
+  def _sequence_length(self) -> int:
+    return tokenizer.SEQUENCE_LENGTH + 1  # (s) + (a)
+
+  def map(
+      self, element: bytes
+  ) -> tuple[constants.Sequences, constants.LossMask]:
+    fen, move = constants.CODERS['behavioral_cloning'].decode(element)
+    # print(_process_move(move))
+    return fen, move
+
 
 class ConvertBehavioralCloningDataToSequence(ConvertToSequence):
   """Converts the fen, move, and win probability into a sequence of integers."""
@@ -129,6 +141,7 @@ _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,
     'action_value': ConvertActionValueDataToSequence,
     'state_value': ConvertStateValueDataToSequence,
+    'prompting': ConvertBehavioralCloningDataToStr
 }
 
 
@@ -138,7 +151,7 @@ def build_data_loader(config: config_lib.DataConfig) -> pygrain.DataLoader:
   data_source = bagz.BagDataSource(
       os.path.join(
           os.getcwd(),
-          f'../data/{config.split}/{config.policy}_data.bag',
+          f'../data/{config.split}/behavioral_cloning_data.bag',
       ),
   )
 

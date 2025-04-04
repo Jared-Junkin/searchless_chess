@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 from dataclasses import dataclass
 
 from jared_data_loader import InferenceTimeBehavioralCloning
-
+from filelock import FileLock
 
 @dataclass
 class LegalMoveResponse:
@@ -121,12 +121,6 @@ class StockfishPlayer(Player):
         self._engine.quit()
 
 
-def get_gpt_response(game_state: str, model: str, temperature: float) -> Optional[str]:
-    # trying to prevent what I believe to be rate limit issues
-    if model == "gpt-4":
-        time.sleep(0.4)
-    response = gpt_query.get_gpt_response(game_state, model, temperature)
-    return response
 
 
 def get_move_from_gpt_response(response: Optional[str]) -> Optional[str]:
@@ -443,7 +437,6 @@ def play_game_human(
             game_state += " "
         game_state += current_move_num
         print(f"{current_move_num}", end="")
-
         (
             game_state,
             player_one_resignation,
@@ -514,7 +507,11 @@ def play_game_human(
 
 #################################################################################
 
-
+N_MATE_MOVES = 6 # mate in 5 or less
+MATES_FILE = "mates_rlhf.txt"
+LOCK_FILE = MATES_FILE + ".lock"
+lock = FileLock(LOCK_FILE)
+SEEN_MATES = set()
 def play_game(
     player_one: Player,
     player_two: Player,
@@ -524,6 +521,8 @@ def play_game(
     # NOTE: I'm being very particular with game_state formatting because I want to match the PGN notation exactly
     # It looks like this: 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 etc. HOWEVER, GPT prompts should not end with a trailing whitespace
     # due to tokenization issues. If you make changes, ensure it still matches the PGN notation exactly.
+    stockfish_path = "/usr/games/stockfish"
+    helper = chess.engine.SimpleEngine.popen_uci(stockfish_path) # probably will need to make sure my helper has the same color as my agent
     for _ in range(max_games):  # Play 10 games
         ## commenting this out for now. but I likely will need some kind of prompt once I start training language-capable models
         with open("gpt_inputs/prompt.txt", "r") as f:
@@ -548,7 +547,7 @@ def play_game(
 
         total_moves = 0
         illegal_moves = 0
-
+        last_add = 0
         while not board.is_game_over():
             with open("game.txt", "w") as f:
                 f.write(game_state)
@@ -562,13 +561,44 @@ def play_game(
             if board.fullmove_number != 1:
                 game_state += " "
             game_state += current_move_num
-            print(f"{current_move_num}", end="")
+            ############ This code is for getting out mate <M5
+            # not attempting to generalize this to black yet, even though it wouldn't be hard. probablyt should.
+            # info = helper.analyse(board, chess.engine.Limit(depth=10), multipv=5)
+            # top_score = info[0]['score'].relative
+            # # if it's mate and we aren't the one getting mated
+            # if top_score.is_mate() and top_score.mate() > 0: 
+            #     fen_string = board.fen()
+            #     sp = fen_string.split()
+            #     position_only_fen = " ".join(sp[:-2])
+            #     move_num = int(sp[-1])
+            #     # make it so there are no repeat positions and 10 moves must pass
+            #     # between mate positions added (this way there's more diversity and 
+            #     # # less overfitting)
+            #     if position_only_fen not in SEEN_MATES and (move_num - last_add >= 10 or last_add==0):
+            #         last_add = move_num
+            #         SEEN_MATES.add(position_only_fen)
+            #         with lock, open(MATES_FILE, 'a') as f:
+            #             f.write(f"{fen_string}\n") # move & half-move shouldn't be in train process, but it is, so I'll keep it in RL
+            #             # not putting starting eval in there. we can calculate in the loop
+                    
+                    
+            # if info[0]['score'].relative.is_mate():
+            #     mx = info[0]['score'].relative.mate()
+            #     if mx < N_MATE_MOVES:
+            #         fen_string = board.fen()
+            #         position_only_fen = " ".join(fen_string.split()[:-2])
+            #         if position_only_fen not in SEEN_MATES:
+            #             SEEN_MATES.add(position_only_fen)
+            #             with lock, open(MATES_FILE, 'a') as f:
+            #                 f.write(f"{fen_string}\n")
+                            
 
             (
                 game_state,
                 player_one_resignation,
                 player_one_failed_to_find_legal_move,
                 illegal_moves_one,
+
             ) = play_turn(player_one, board, game_state, player_one=True)
             player_one_illegal_moves += illegal_moves_one
             if illegal_moves_one != 0:
@@ -632,37 +662,45 @@ def play_game(
 RUN_FOR_ANALYSIS = True
 recording_file = "logs/determine.csv"  # default recording file. Because we are using list [player_ones], recording_file is overwritten
 # player_ones = ['ckpt12000.pt']# player_ones = ["ckpt600000.pt"]
-player_ones = ['ckpt' + str(600000) + ".pt"]
-# player_two_recording_name = "stockfish"
+player_ones = ['ckpt' + str(200000) + "_causal.pt"]
+player_two_recording_name = "stockfish"
 
 CODEX = InferenceTimeBehavioralCloning()
+
+
+
 if __name__ == "__main__":
     
-    ## playing a human game aginst the bot
-    start = 1 # forcing human to play black
-    if start == 0: # human is white
-        color = "white"
-        player_one = humanPlayer()
-        player_one_recording_name = "human"
-        player_two_recording_name = player_ones[0]
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-    else: # human is black
-        color = "black"
-        player_one_recording_name = player_ones[0]
-        player_two_recording_name = "human"
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-        player_two = humanPlayer()
-    print(f"Starting game against model {player_ones[0]}. You are {color}. Good luck!")
-    play_game_human(player_one=player_one, player_two=player_two)
+    # ## playing a human game aginst the bot
+    # start = 1 # forcing human to play black
+    # if start == 0: # human is white
+    #     color = "white"
+    #     player_one = humanPlayer()
+    #     player_one_recording_name = "human"
+    #     player_two_recording_name = player_ones[0]
+    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+    # else: # human is black
+    #     color = "black"
+    #     player_one_recording_name = player_ones[0]
+    #     player_two_recording_name = "human"
+    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+    #     player_two = humanPlayer()
+    # print(f"Starting game against model {player_ones[0]}. You are {color}. Good luck!")
+    # play_game_human(player_one=player_one, player_two=player_two)
     
     
     ## play 100 games against each stockfish agent to test how strong the model really is
+    ## removing draws as deepmind did.
     # stockfish_play_time=0.1
     # num_games=100
     # player_one_recording_name=player_ones[0]
+    # DRAW_FILE = "draws.txt"
     # for i in range(11):
     #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
     #     player_two_recording_name = "stockfish" + str(i)
+    #     with open(DRAW_FILE, 'a') as f:
+    #         f.write(f"{player_two_recording_name}\n")
+    #         f.close()
     #     player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
     #     play_game(player_one, player_two, num_games)
     
@@ -674,4 +712,31 @@ if __name__ == "__main__":
     #     player_two = StockfishPlayer(skill_level=25, play_time=stockfish_play_time)
     #     play_game(player_one, player_two, num_games)
         
-    
+    ## play 100 games against each stockfish agent (50 with white, 50 with black) to test how strong the model really is
+    stockfish_play_time=0.1
+    num_games=50
+    player_one_recording_name=player_ones[0]
+    DRAW_FILE = "draws.txt"
+    # white
+    for i in range(11):
+        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+        player_two_recording_name = "stockfish" + str(i)
+        # with open(DRAW_FILE, 'a') as f:
+        #     f.write(f"{player_two_recording_name}\n")
+        #     f.close()
+        player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+        play_game(player_one, player_two, num_games)
+        
+    stockfish_play_time=0.1
+    num_games=50
+    player_two_recording_name=player_ones[0]
+    DRAW_FILE = "draws.txt"
+    # black
+    for i in range(11):
+        player_two = NanoGptPlayer(model_name=player_two_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+        player_one_recording_name = "stockfish" + str(i)
+        # with open(DRAW_FILE, 'a') as f:
+        #     f.write(f"{player_one_recording_name}\n")
+        #     f.close()
+        player_one = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+        play_game(player_one, player_two, num_games)

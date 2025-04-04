@@ -94,7 +94,7 @@ def main(argv: Sequence[str]) -> None:
       num_return_buckets=num_return_buckets,
       num_eval_data=64,
   )
-
+  data_iter = data_loader.build_data_loader(config=train_config.data).__iter__()
   params = training.train(
       train_config=train_config,
       predictor_config=predictor_config,
@@ -102,6 +102,7 @@ def main(argv: Sequence[str]) -> None:
   )
 
   predictor = transformer.build_transformer_predictor(predictor_config)
+  
   evaluator = metrics_evaluator.build_evaluator(predictor, eval_config)
   print(evaluator.step(params=params, step=train_config.num_steps))
 
