@@ -40,6 +40,7 @@ def eval_wrapper(config: dict, expand_path: str = None)->None:
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}['bfloat16']
     ctx = nullcontext() if config['device_type'] == 'cpu' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
     config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
+    print(config)
     
     
     tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"]) # tokenizer is always going to be the same.
@@ -173,7 +174,10 @@ def get_f2_penalty(it: int, config: dict)->float:
 
 def training(config: dict) -> None:
     # set variables
+    print("entered training")
     logger = setupLogger(config=config)
+    print("initialized logger")
+    
     for key, value in config.items():
         logger.info(f"{key}: {value}\n")
     max_iters = config["max_iters"]
@@ -186,7 +190,9 @@ def training(config: dict) -> None:
     scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
     # load model, tokenizer, dataloader
     tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"])
+    print("initialized tokenizer")x
     config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
+    print("reached past setup_ddp_params")
     
     if "LORA" in config and config["LORA"]==True:
         # QLORA (quantization parameters)
@@ -239,18 +245,11 @@ def training(config: dict) -> None:
 
         
     ## create dataloader
-    train_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="train")
+    train_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, data_dir = "../data/", split="train")
     # model.resize_token_embeddings(len(tokenizer)) # must resize the length of the modelstoken embeddings because we've added tokens to the tokenizer
     ## create optimizer 
     optimizer = create_optimizer(model, config)
         ## store initial params for F2 regularization penalty
-    if config["F2_regularization"]==True:
-        with torch.no_grad():
-            initial_params = []
-            for (name, p) in model.named_parameters():
-                if p.requires_grad:
-                    initial_params.append(p.view(-1))
-            initial_params_flat = torch.cat(initial_params) 
     print(optimizer)
     
     if ddp:
@@ -274,7 +273,9 @@ def training(config: dict) -> None:
     eval_interval = config["eval_interval"]
     always_save_checkpoint = config["always_save_checkpoint"]
     
-    test_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="test")
+    print("creating test dataloader")
+    test_iter = LlamaLoader(training_config=config, tokenizer=tokenizer,data_dir="../data/", split="test")
+    print("done creating test dataloader")
     ## unit tests to make sure the dataloaders can repeat over dataset and not raise stopIteration errors
     # test_data_loader(loader=test_iter, iters=10*len(test_iter))
     # print(f"made it through test loader")
@@ -286,6 +287,7 @@ def training(config: dict) -> None:
     logger.info(f"Starting Train loop. Batch size: {config['batch_size']}, learning rate: {learning_rate}, gradient steps: {gradient_accumulation_steps}, weight_decay: {decay_lr}, ddp_local_rank: {ddp_local_rank}")
     loss_avg = 0
     n_updates =0
+    print("starting train loop")
     while iter_num < max_iters:
         # if training is interrupted, restart at the same iter num, cycling through train_iter as  you go so we don't repeat data until we need to.
         if "start_iter" in config and config["start_iter"]>iter_num:
@@ -317,7 +319,8 @@ def training(config: dict) -> None:
             ### removing this because model spazzed after most recent eval.
             if iter_num % eval_interval == 0 and master_process:
                 logger.info(f"beginning evaluation (iter {iter_num})")
-                estimate_loss(model=model, eval_iters=config["eval_iters"], loader=test_iter, tokenizer=tokenizer,logger=logger, iter_num=iter_num, ctx=ctx)
+                out = estimate_loss(model=model, eval_iters=config["eval_iters"], loader=test_iter, tokenizer=tokenizer,logger=logger, iter_num=iter_num, ctx=ctx)
+                # print(f"out is {out}")
 
             if iter_num % config["save_interval"] == 0 and master_process:
                 # Checkpoint saving
@@ -333,6 +336,19 @@ def training(config: dict) -> None:
                     # save optimizer
                     # torch.save(optimizer.state_dict(), checkpoint_dir)
                     torch.save(optimizer.state_dict(), os.path.join(checkpoint_dir, "opt_state_dict.pt"))
+                else: 
+                    checkpoint_dir = os.path.join(out_dir, f"ckpt")
+                    if ddp:
+                        model.module.save_pretrained(checkpoint_dir)
+                    else:
+                        model.save_pretrained(checkpoint_dir)
+                    # save tokenizer
+                    tokenizer.save_pretrained(checkpoint_dir)
+                    # save optimizer
+                    # torch.save(optimizer.state_dict(), checkpoint_dir)
+                    torch.save(optimizer.state_dict(), os.path.join(checkpoint_dir, "opt_state_dict.pt"))
+                    
+                
                     
 
             # Training step (including gradient accumulation)
@@ -550,7 +566,7 @@ if __name__ == "__main__":
     # config_file = "/workspace/searchless_chess/src/config_llama_qlora.yaml"         # config for fine-tuning llama with LoRA
     # config_file = "/workspace/searchless_chess/src/config_llama_accuracy.yaml"         # config for llama finetuning with penalty for partially correct moves. (determined this doesn't work)
     
-    config_file = "/workspace/searchless_chess/src/confi_llama_smallPrompt.yaml" # removing legal moves. hoping this allows me to 10x batch size, leading to more accurate gradient signal and better model.
+    config_file = "./confi_llama_smallPrompt.yaml" # removing legal moves. hoping this allows me to 10x batch size, leading to more accurate gradient signal and better model.
     
 
     with open(config_file, "r") as stream:

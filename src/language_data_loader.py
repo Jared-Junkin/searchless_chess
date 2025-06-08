@@ -510,7 +510,7 @@ class LlamaLoader:
             tokenizer=tokenizer,
             tokenizer_save_path=training_config["out_dir"],
             shuffle=training_config["shuffle"],
-            worker_count=training_config["worker_count"],  # 0 disables multiprocessing.
+            worker_count=training_config['worker_count'],  # 0 disables multiprocessing.
             num_return_buckets=training_config["num_return_buckets"],
             policy=training_config["policy"],
             split=split,

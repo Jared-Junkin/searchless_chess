@@ -53,7 +53,7 @@ def setupLogger(config: dict, logger_name: str = "jaredLogger", log_level: str =
 def run_with_error_handling(
     func: Callable[..., None], 
     *args: Any, 
-    log_path: Optional[str]="/workspace/searchless_chess/src/pythia/logs/errors.log",
+    log_path: Optional[str]="./logs/errors.log",
     **kwargs: Any
 ) -> None:
     """
@@ -629,7 +629,7 @@ def log_batch_info(iter_num, loss, predicted_tokens, best_moves, ground_truth_pr
         f"Mean best move prob: {torch.mean(torch.tensor(avg_best_move_probs)):.4f}, "
         f"Mean chosen move prob: {torch.mean(torch.tensor(avg_chosen_move_probs)):.4f}"
     )
-    print(f"logging batch details")
+    # print(f"logging batch details")
     logger.info(f"Attended tokens for sample 0: {attended_tokens}")
     logger.info(f"Attention mask for sample 0: {attn_mask[0]}")
     token_indices = torch.nonzero(attn_mask[0])
