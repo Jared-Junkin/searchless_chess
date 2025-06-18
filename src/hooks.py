@@ -5,6 +5,7 @@ from language_data_loader import LlamaLoader
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
+import torch.distributed as dist     
 from torch.distributed import init_process_group
 import math
 # abstract hook class
@@ -78,51 +79,53 @@ def run_with_error_handling(
         
         exit(1)
 
-def set_ddp_params(config: dict) -> Tuple[dict, str, int]:
-    """
-    Sets up Distributed Data Parallel (DDP) parameters.
 
-    Args:
-        config (dict): Configuration dictionary with at least a 'device' and 'backend' key.
-
-    Returns:
-        Tuple[dict, str, int]: Updated config, the device string, and whether DDP is active (1 for True, 0 for False).
+def set_ddp_params(config: dict) -> Tuple[dict, str, bool, int, bool]:
     """
-    # Determine if this is a DDP run
-    ddp = int(os.environ.get('RANK', -1)) != -1  # Is this a DDP run?
+    Initialise distributed (NCCL) and return the info your code expects.
+
+    Returns
+    -------
+    config  : dict   – updated with ddp_world_size / ddp_local_rank / ddp_rank
+    device  : str    – e.g. "cuda:3"  or  "cpu"
+    ddp     : bool   – True if multi‑process run
+    local   : int    – local rank  (0 in single‑GPU mode)
+    master  : bool   – True only on global rank 0
+    """
+    # ---------- Are we in a torchrun / mpirun launch?
+    ddp = int(os.environ.get("RANK", "-1")) != -1
 
     if ddp:
-        # Initialize process group for DDP
-        init_process_group(backend=config['backend'])
+        if not dist.is_initialized():
+            dist.init_process_group(backend=config.get("backend", "nccl"))
 
-        # Fetch environment variables
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        ddp_rank       = int(os.environ["RANK"])
+        ddp_local_rank = int(os.environ["LOCAL_RANK"])
+        ddp_world_size = int(os.environ["WORLD_SIZE"])
 
-        # Set DDP-specific config parameters
-        config["ddp_world_size"] = ddp_world_size
-        config["ddp_local_rank"] = ddp_local_rank
-        config["ddp_rank"] = ddp_rank
+        # save into cfg for later convenience
+        config.update(
+            ddp_world_size=ddp_world_size,
+            ddp_local_rank=ddp_local_rank,
+            ddp_rank=ddp_rank,
+        )
 
-        # Set the device based on local rank
-        device = f'cuda:{ddp_local_rank}'
-        torch.cuda.set_device(device)
+        device = f"cuda:{ddp_local_rank}"
+        torch.cuda.set_device(ddp_local_rank)   # important for FSDP
 
-        master_process = ddp_rank == 0 
-        print(f"Using Multiprocessing: ddp world size is {ddp_world_size}, local rank is {ddp_local_rank}. Master Process: {master_process}")
+        master_process = ddp_rank == 0
+        print(f"[FSDP] world={ddp_world_size}  "
+              f"rank={ddp_rank}  local_rank={ddp_local_rank}  "
+              f"master={master_process}")
+
     else:
-        # Single GPU or CPU setup
-        device = config['device']
-        config["ddp_world_size"] = 0
-        config["ddp_local_rank"] = 0
-        config["ddp_rank"] = 0
+        # ---- single‑GPU (or CPU) fallback
+        device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+        config.update(ddp_world_size=1, ddp_local_rank=0, ddp_rank=0)
         master_process = True
-        ddp_local_rank=0
+        print(f"[Single] device={device}")
 
-        print(f"Setting up on device {device}")
-
-    return config, device, ddp, ddp_local_rank, master_process
+    return config, device, ddp, config["ddp_local_rank"], master_process
 
 class HookManager:
     def __init__(self)->None:

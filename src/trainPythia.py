@@ -6,6 +6,8 @@ import torch
 from torch.utils.data import DataLoader
 import math
 import wandb
+from functools import partial 
+import psutil, os, humanize
 from language_data_loader import LlamaLoader
 from config_language import LanguageDataConfig
 from torch.optim import Adam
@@ -24,51 +26,20 @@ from yaml import CLoader as Loader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import traceback
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
+from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+import torch.distributed as dist
 
-
-def eval_wrapper(config: dict, expand_path: str = None)->None:
-    def extract_number_from_checkpoint(checkpoint):
-        # Extract the numeric part of the string without using regex
-        number = ""
-        for char in checkpoint:
-            if char.isdigit():
-                number += char
-        return int(number) if number else None
-    
-    
-    logger = setupLogger(config=config)
-    ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}['bfloat16']
-    ctx = nullcontext() if config['device_type'] == 'cpu' else torch.amp.autocast(device_type=config['device_type'], dtype=ptdtype)
-    config, device, ddp, ddp_local_rank, master_process = set_ddp_params(config=config)
-    
-    
-    tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"]) # tokenizer is always going to be the same.
-    # train_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="train")
-    test_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="test")
-    
-    if expand_path is not None: # if expand path is not none, it will evaluate all models at expand path. otherwise, it will only evaluate the one model currently specified in config
-        all_dirs = os.listdir(expand_path)
-        ckpt_directories = [entry for entry in all_dirs if 'ckpt' in entry and os.path.isdir(os.path.join(expand_path, entry))]
-        for ckpt in ckpt_directories:
-            ckpt_path = os.path.join(expand_path, ckpt)
-            logger.info(f"starting ckpt {ckpt}")
-            # tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-            model = AutoModelForCausalLM.from_pretrained(ckpt_path)
-            model.to(device)
-            iter_num = extract_number_from_checkpoint(checkpoint=ckpt)
-            estimate_loss(model=model, eval_iters=20, loader=test_iter, tokenizer=tokenizer,logger=logger, iter_num=iter_num+17000, ctx=ctx)
-            
+def print_gpu_mem(prefix=""):
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated()
+        reserved = torch.cuda.memory_reserved()
+        print(f"{prefix} GPU memory: allocated = {humanize.naturalsize(allocated, binary=True)}, reserved = {humanize.naturalsize(reserved, binary=True)}")
     else:
-        # tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_load_dir"])
-        model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
-            
-        model.to(device)
+        print(f"{prefix} GPU memory: CUDA not available.")
 
-            
-        estimate_loss(model=model, eval_iters=1, train_loader=train_iter, test_loader=test_iter, tokenizer=tokenizer,logger=logger, iter_num=101000, ctx=ctx)
-        # destroy subprocess at end
-    if ddp:
-        destroy_process_group()
 @torch.no_grad()
 def estimate_loss(model: AutoModelForCausalLM, eval_iters: int, loader: DataLoader, tokenizer, logger, iter_num:int,  ctx=None, split: str = "test") -> dict:
     
@@ -221,42 +192,44 @@ def training(config: dict) -> None:
         model.train()
         model.gradient_checkpointing_enable()
     else:
-        model = AutoModelForCausalLM.from_pretrained(config["model_load_dir"])
-        # model.gradient_checkpointing_enable()
+        print_gpu_mem("Before model load:")
+        model = AutoModelForCausalLM.from_pretrained(
+            "./llama/llama3_1B",
+            torch_dtype=torch.bfloat16,        # halves weight size
+            low_cpu_mem_usage=True,            # stream shard‑by‑shard, no double copy
+            device_map=None)                  # keep on CPU for now
+        print("parameters:", sum(p.numel() for p in model.parameters())/1e9, "B")
         model.train()
+        print_gpu_mem("After model load:")
         
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_trainable_params:,}")
-
-    
-    # decrease context length of model.
-    # current_positional_embeddings = model.model.get_input_embeddings().weight
-    # new_positinal_embeddings = current_positional_embeddings[:config["max_context_length"]].clone()
-    # model.model.embed_tokens = torch.nn.Embedding(num_embeddings=config["max_context_length"], embedding_dim=model.config.hidden_size) # num embeddings = context length, embedding_dim = embedding dimension
-    # model.model.embed_tokens.weight.data = new_positinal_embeddings
-
-    model.to(device)
-
         
     ## create dataloader
+    print("about to start dataloader") 
     train_iter = LlamaLoader(training_config=config, tokenizer=tokenizer, split="train")
+    print("successfully initialized dataloader") 
     # model.resize_token_embeddings(len(tokenizer)) # must resize the length of the modelstoken embeddings because we've added tokens to the tokenizer
-    ## create optimizer 
-    optimizer = create_optimizer(model, config)
-        ## store initial params for F2 regularization penalty
-    if config["F2_regularization"]==True:
-        with torch.no_grad():
-            initial_params = []
-            for (name, p) in model.named_parameters():
-                if p.requires_grad:
-                    initial_params.append(p.view(-1))
-            initial_params_flat = torch.cat(initial_params) 
-    print(optimizer)
-    
-    if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
+
+    auto_wrap_policy = partial(size_based_auto_wrap_policy,
+                           min_num_params=int(1e6))
+    mp_policy = MixedPrecision(param_dtype=torch.bfloat16,
+                               reduce_dtype=torch.bfloat16,
+                               buffer_dtype=torch.bfloat16)
+
+    model = FSDP(
+    model,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,
+    auto_wrap_policy=auto_wrap_policy,        # ← pass the *callable*
+    mixed_precision=mp_policy,
+    device_id=torch.cuda.current_device(),
+)
 
     print(f"successfully wrapped model with DDP object for parallel processing")
+        ## create optimizer 
+    optimizer = create_optimizer(model, config)
+    print(optimizer)
+    print("successfully created optimizer")
 
     # seq, attn_mask, loss_mask = next(data_iter)
     # print(f"seq is {seq}")
@@ -283,194 +256,90 @@ def training(config: dict) -> None:
     seq, loss_mask = next(train_iter)
     seq = seq.to(device)
     loss_mask=loss_mask.to(device)
+    print("loaded first batch")
     logger.info(f"Starting Train loop. Batch size: {config['batch_size']}, learning rate: {learning_rate}, gradient steps: {gradient_accumulation_steps}, weight_decay: {decay_lr}, ddp_local_rank: {ddp_local_rank}")
     loss_avg = 0
     n_updates =0
     while iter_num < max_iters:
+        if master_process:
+            print(f"starting iter {iter_num}")
         # if training is interrupted, restart at the same iter num, cycling through train_iter as  you go so we don't repeat data until we need to.
-        if "start_iter" in config and config["start_iter"]>iter_num:
-            if decay_lr:
-                lr = get_lr(iter_num, config)
-            else:
-                lr = learning_rate
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
-            if iter_num % eval_interval == 0 and master_process:
-                logger.info(f"beginning evaluation (iter {iter_num})")
-            for micro_step in range(gradient_accumulation_steps):
-                seq, loss_mask= next(train_iter)
-                seq = seq.to(device)
-                loss_mask = loss_mask.to(device)
-            iter_num += 1
-            local_iter_num += 1
-        else:            
-            # print(f"beginning iteration {iter_num}")
-            # Set learning rate for the current iteration
-            if decay_lr:
-                lr = get_lr(iter_num, config)
-            else:
-                lr = learning_rate
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
 
-            # Evaluation and logging every eval_interval steps
-            ### removing this because model spazzed after most recent eval.
-            if iter_num % eval_interval == 0 and master_process:
-                logger.info(f"beginning evaluation (iter {iter_num})")
-                estimate_loss(model=model, eval_iters=config["eval_iters"], loader=test_iter, tokenizer=tokenizer,logger=logger, iter_num=iter_num, ctx=ctx)
+        n_updates += 1
+        for micro_step in range(gradient_accumulation_steps):
+            if ddp:
+                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+            with ctx:
 
-            if iter_num % config["save_interval"] == 0 and master_process:
-                # Checkpoint saving
-                if always_save_checkpoint:
-                    checkpoint_dir = os.path.join(out_dir, f"ckpt{iter_num}")
-                    # save model
-                    if ddp:
-                        model.module.save_pretrained(checkpoint_dir)
-                    else:
-                        model.save_pretrained(checkpoint_dir)
-                    # save tokenizer
-                    tokenizer.save_pretrained(checkpoint_dir)
-                    # save optimizer
-                    # torch.save(optimizer.state_dict(), checkpoint_dir)
-                    torch.save(optimizer.state_dict(), os.path.join(checkpoint_dir, "opt_state_dict.pt"))
-                    
-
-            # Training step (including gradient accumulation)
-            # logger.info(f"reached this line in iter {iter_num}")
-            ## this prints the batch data across each individual process. should be different.
-            # print(f"Rank {dist.get_rank()} - First sample FEN: {fen[0]}")
-            # dist.barrier()
-            n_updates += 1
-            for micro_step in range(gradient_accumulation_steps):
-                if ddp:
-                    model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-                with ctx:
-                    
-                    # if iter_num % eval_interval == 0: # making it so only one micro step can log
-                    #     loss, logits, shifted_mask, shifted_labels, outputs, seq_tmp, attn_mask, sequence_accuracy, mean_correct_prob, mean_chosen_prob = forward_step_hook(seq=seq,
-                    #                                                                    loss_mask=loss_mask,
-                    #                                                                    attn_mask=attn_mask,
-                    #                                                                    model=model,
-                    #                                                                    gradient_accumulation_steps=gradient_accumulation_steps,
-                    #                                                                    method=config["attn_method"])
-
-                    # else:
-                        # let's see how much faster we can make this        
-                    loss = fast_forward_step_hook(seq=seq,
-                                                loss_mask=loss_mask,
-                                                model=model,
-                                                gradient_accumulation_steps=gradient_accumulation_steps,
-                                                method=config["attn_method"])
-                    # acc += sequence_accuracy
-                    # avg_correct_prob += mean_correct_prob
-                    # avg_chosen_prob += mean_chosen_prob
-                    loss_avg += loss
+                # else:
+                    # let's see how much faster we can make this        
+                loss = fast_forward_step_hook(seq=seq,
+                                            loss_mask=loss_mask,
+                                            model=model,
+                                            gradient_accumulation_steps=gradient_accumulation_steps,
+                                            method=config["attn_method"])
+                # acc += sequence_accuracy
+                # avg_correct_prob += mean_correct_prob
+                # avg_chosen_prob += mean_chosen_prob
+                loss_avg += loss
 
 
 
-                seq, loss_mask= next(train_iter)
-                seq = seq.to(device)
-                loss_mask = loss_mask.to(device)
-                # Only apply F2 penalty on the final micro-step before backpropagating the full batch loss
-                if micro_step == gradient_accumulation_steps - 1 and config["F2_regularization"]==True:
-                    # print(f"doing f2 regularization")
-                    loss = F2_loss_hook(
-                        model=model,
-                        F2_lambda=get_f2_penalty(it=iter_num, config=config),
-                        initial_params_flat=initial_params_flat,
-                        loss=loss
-                    )
-                
-                # Backward pass with gradient scaling for mixed precision
-                scaler.scale(loss).backward()
-            if config["grad_clip"] != 0.0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
-            
-            ## this code verifies that the gradients across all process are synced after the gradient accumulation steps.
-            # param_name, param = list(model.named_parameters())[0]
-            # grad_norm = param.grad.data.norm().item()
-            # print(f"Rank {dist.get_rank()} - {param_name} grad norm after all microsteps: {grad_norm}")
-            # dist.barrier()
+            seq, loss_mask= next(train_iter)
+            seq = seq.to(device)
+            loss_mask = loss_mask.to(device)
+            # Only apply F2 penalty on the final micro-step before backpropagating the full batch loss
+            if micro_step == gradient_accumulation_steps - 1 and config["F2_regularization"]==True:
+                # print(f"doing f2 regularization")
+                loss = F2_loss_hook(
+                    model=model,
+                    F2_lambda=get_f2_penalty(it=iter_num, config=config),
+                    initial_params_flat=initial_params_flat,
+                    loss=loss
+                )
 
-            scaler.step(optimizer)
-            scaler.update()
-            
-            # log to wand if we want to.
-            # log_wand_hook(wand_log = config["wandb_log"],
-            #               master_process=master_process,
-            #               iter_num=iter_num,
-            #               log_interval=log_interval,
-            #               outputs=outputs,
-            #               model=model,
-            #               ddp=ddp)
-            # flush the gradients as soon as we can, no need for this memory anymore
-            if config["tens_log"] and master_process and iter_num % (eval_interval * 10) == 0:
-                logger.info(f"logging tensorboard on iter {iter_num}")
-                nbins = 512  # Set the desired number of bins
+            # Backward pass with gradient scaling for mixed precision
+            scaler.scale(loss).backward()
+        if config["grad_clip"] != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
 
-                # Access transformer layers
-                en_obj = enumerate(model.module.model.layers) if ddp else enumerate(model.model.layers)
-                for i, layer in en_obj:
-                    # Query-Key-Value projections
-                    qkv_weights = layer.self_attn.q_proj.weight
-                    qkv_grads = qkv_weights.grad
+        ## this code verifies that the gradients across all process are synced after the gradient accumulation steps.
+        # param_name, param = list(model.named_parameters())[0]
+        # grad_norm = param.grad.data.norm().item()
+        # print(f"Rank {dist.get_rank()} - {param_name} grad norm after all microsteps: {grad_norm}")
+        # dist.barrier()
 
-                    # Extract and log QKV weights
-                    q_weights = layer.self_attn.q_proj.weight.detach().cpu().float().numpy()
-                    k_weights = layer.self_attn.k_proj.weight.detach().cpu().float().numpy()
-                    v_weights = layer.self_attn.v_proj.weight.detach().cpu().float().numpy()
+        scaler.step(optimizer)
+        scaler.update()
 
-                    writer.add_histogram(f"q_weights_layer_{i}", q_weights, global_step=iter_num, bins=nbins)
-                    writer.add_histogram(f"k_weights_layer_{i}", k_weights, global_step=iter_num, bins=nbins)
-                    writer.add_histogram(f"v_weights_layer_{i}", v_weights, global_step=iter_num, bins=nbins)
 
-                    # Dense weights
-                    dense_weights = layer.mlp.gate_proj.weight
-                    dense_weights_data = dense_weights.detach().cpu().float().numpy()
-                    writer.add_histogram(f"dense_weights_layer_{i}", dense_weights_data, global_step=iter_num, bins=nbins)
+        optimizer.zero_grad(set_to_none=True)
 
-                    # Log gradients if available (ensure only one set of grads is logged)
-                    if qkv_grads is not None:
-                        q_grads = layer.self_attn.q_proj.weight.grad.detach().cpu().float().numpy()
-                        k_grads = layer.self_attn.k_proj.weight.grad.detach().cpu().float().numpy()
-                        v_grads = layer.self_attn.v_proj.weight.grad.detach().cpu().float().numpy()
 
-                        writer.add_histogram(f"q_grads_layer_{i}", q_grads, global_step=iter_num, bins=nbins)
-                        writer.add_histogram(f"k_grads_layer_{i}", k_grads, global_step=iter_num, bins=nbins)
-                        writer.add_histogram(f"v_grads_layer_{i}", v_grads, global_step=iter_num, bins=nbins)
+        t1 = time.time()
+        dt = t1 - t0
+        t0 = t1
+        if iter_num % log_interval == 0:
+            loss_value = loss_avg/max(1, n_updates)
+            loss_avg = 0
+            n_updates =0 
+            # loss_value = loss.item() # not multiplying by # of gradient accumulation steps. want avg loss so I can get a good idea of how the loss changes
+            if local_iter_num >= 5: # let the training loop settle a bit
+                mfu = 0 # TODO: replace with mfu function later.
+                running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+            if master_process:
+                # changed the probs in here because I'm using log-softmax now for memory reasons.
+                logger.info(f"iter {iter_num}: loss {loss_value:.4f}, time {(dt/gradient_accumulation_steps)*1000:.2f}ms")
 
-                    # Dense layer gradients
-                    dense_grads = dense_weights.grad
-                    if dense_grads is not None:
-                        dense_grads_data = dense_grads.detach().cpu().float().numpy()
-                        writer.add_histogram(f"dense_grads_layer_{i}", dense_grads_data, global_step=iter_num, bins=nbins)
-
-            optimizer.zero_grad(set_to_none=True)
-            
-
-            t1 = time.time()
-            dt = t1 - t0
-            t0 = t1
-            if iter_num % log_interval == 0:
-                loss_value = loss_avg/max(1, n_updates)
-                loss_avg = 0
-                n_updates =0 
-                # loss_value = loss.item() # not multiplying by # of gradient accumulation steps. want avg loss so I can get a good idea of how the loss changes
-                if local_iter_num >= 5: # let the training loop settle a bit
-                    mfu = 0 # TODO: replace with mfu function later.
-                    running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-                if master_process:
-                    # changed the probs in here because I'm using log-softmax now for memory reasons.
-                    logger.info(f"iter {iter_num}: loss {loss_value:.4f}, time {(dt/gradient_accumulation_steps)*1000:.2f}ms")
-                    if config["wandb_log"]:
-                        print(f"logging wandb outside loop")
-                        # wandb.log({"val_loss": best_val_loss, "train_loss": loss_value})
-                        wandb.log({"train_loss": loss_value, "time": dt/gradient_accumulation_steps*1000})
-                    # else:
-                        # print(f"not using wandb outside loop")
-            iter_num += 1
-            local_iter_num += 1
+                if config["wandb_log"]:
+                    print(f"logging wandb outside loop")
+                    # wandb.log({"val_loss": best_val_loss, "train_loss": loss_value})
+                    wandb.log({"train_loss": loss_value, "time": dt/gradient_accumulation_steps*1000})
+                # else:
+                    # print(f"not using wandb outside loop")
+        iter_num += 1
+        local_iter_num += 1
 
     print("Training complete.")
         
@@ -550,7 +419,7 @@ if __name__ == "__main__":
     # config_file = "/workspace/searchless_chess/src/config_llama_qlora.yaml"         # config for fine-tuning llama with LoRA
     # config_file = "/workspace/searchless_chess/src/config_llama_accuracy.yaml"         # config for llama finetuning with penalty for partially correct moves. (determined this doesn't work)
     
-    config_file = "/workspace/searchless_chess/src/confi_llama_smallPrompt.yaml" # removing legal moves. hoping this allows me to 10x batch size, leading to more accurate gradient signal and better model.
+    config_file = "./confi_llama_smallPrompt.yaml" # removing legal moves. hoping this allows me to 10x batch size, leading to more accurate gradient signal and better model.
     
 
     with open(config_file, "r") as stream:

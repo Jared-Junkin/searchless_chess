@@ -1,25 +1,25 @@
 ---
-model_load_dir: "/workspace/searchless_chess/src/Llama/ckpts_smallPrompt/ckpt55000"
-tokenizer_load_dir: "/workspace/searchless_chess/src/Llama/ckpts_smallPrompt/ckpt55000"
+model_load_dir: "./llama/llama3_1B"
+tokenizer_load_dir: "./llama/llama3_1B"
 policy: "language"
-batch_size: 128                # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size: 100               # if gradient_accumulation_steps > 1, this is the micro-batch size
 num_return_buckets: 128                     # legacy from deepmind code. not used.
 shuffle: True
-start_iter: 55000 # for starting training from an iteration already part of the way through training.
-worker_count: 2                       # 
-max_context_length: 1024                    # reduce memory overhead by limiting context lengths
+start_iter: 0 # for starting training from an iteration already part of the way through training.
+worker_count: 1                      # 
+max_context_length: 512                    # reduce memory overhead by limiting context lengths
 attn_method: "attend_to_prev_answers"
-pad_token: "<|pad|>"
+pad_token: "<|reserved_special_token_0|>"
 bos_token: "<|begin_of_text|>"
 eot_token: "<|end_of_text|>"
-out_dir: '/workspace/searchless_chess/src/Llama/ckpts_smallPrompt/'
+out_dir: '/tmp/ckpts/'
 eval_interval: 5000
 save_interval: 5000
 log_interval: 10
 eval_iters: 20
 eval_only: False                          # if True, script exits right after the first eval
-always_save_checkpoint: True               # if True, always save a checkpoint after each eval
-log_path: "/workspace/searchless_chess/src/Llama/logs/ckpts_smallPrompt_from_scratch.log"
+always_save_checkpoint: False               # if True, always save a checkpoint after each eval. If false, only saves if the eval score is the new best and always overwrites previous saves. 
+log_path: "./logs/ckpts_smallPrompt_from_scratch.log"
 LORA: False
 wandb_log: False
 # tensorboard logging
@@ -27,11 +27,11 @@ tens_log: False
 tens_log_dir: "/workspace/searchless_chess/logs/" # run this command: screen -dmS tens tensorboard --logdir=/workspace/searchless_chess/logs/ --port=6006
 
 # data
-gradient_accumulation_steps: 32            # used to simulate larger batch sizes
+gradient_accumulation_steps: 2            # used to simulate larger batch sizes
 
 # adamw optimizer
 learning_rate: 0.00008                      # max learning rate
-max_iters: 100000                          # total number of training iterations
+max_iters: 600000                          # total number of training iterations
 weight_decay: 0
 beta1: 0.9
 beta2: 0.95
@@ -44,8 +44,8 @@ f2_decay_iters: 40000
 f2_warmup_iters: 2000
 # learning rate decay settings
 decay_lr: True                             # whether to decay the learning rate
-warmup_iters: 1000                         # how many steps to warm up for
-lr_decay_iters: 100000                     # should be ~= max_iters per Chinchilla
+warmup_iters: 2000                         # how many steps to warm up for
+lr_decay_iters: 600000                     # should be ~= max_iters per Chinchilla
 min_lr: 0.000008                            # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 
 # DDP settings
