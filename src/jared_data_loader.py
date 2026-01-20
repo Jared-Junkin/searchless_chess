@@ -200,10 +200,11 @@ def build_data_loader_parallel(
         dataset,
         batch_size=config.batch_size,
         sampler=sampler,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=config.worker_count,
+        pin_memory=True,
         drop_last=True,
     )
+    print(f"num workers is {config.worker_count}")
     # print(f"dataloader initialized in {time.time()-start_time} seconds")
     return data_loader
 

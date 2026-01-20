@@ -32,7 +32,7 @@ from jared_models.nanoGPT import GPT, GPTConfig
 import logging
 logger = logging.getLogger("jaredLogger")
 logger.setLevel("DEBUG")
-file_log =logging.FileHandler("CLLM_causal.log")
+file_log =logging.FileHandler("CLLM_Bidirectional.log")
 logger.addHandler(file_log)
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 file_log.setFormatter(formatter)
@@ -124,11 +124,11 @@ if __name__ == "__main__":
     init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
     # wandb logging
     wandb_log = False # disabled by default
-    wandb_project = 'owt'
-    wandb_run_name = 'gpt2' # 'run' + str(time.time())
+    wandb_project = 'chess_bidirectional'
+    wandb_run_name = 'CLLM' # 'run' + str(time.time())
     # data
     dataset = 'lichess_hf_dataset'
-    gradient_accumulation_steps = 1 # used to simulate larger batch sizes
+    gradient_accumulation_steps = 2 # used to simulate larger batch sizes
     batch_size = 1024 # if gradient_accumulation_steps > 1, this is the micro-batch size
     block_size = 78 # number of tokens.
     # model
@@ -185,7 +185,7 @@ if __name__ == "__main__":
     train_data = config_lib.DataConfig(
         batch_size=batch_size,
         shuffle=True,
-        worker_count=0,  # 0 disables multiprocessing.
+        worker_count=min(8, os.cpu_count()),  # 0 disables multiprocessing.
         # worker_count = min(8, os.cpu_count()),
         num_return_buckets=num_return_buckets,
         policy=policy,
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     test_data = config_lib.DataConfig(
         batch_size=batch_size,
         shuffle=True,
-        worker_count=0,  # 0 disables multiprocessing.
+        worker_count=min(8, os.cpu_count()),  # 0 disables multiprocessing.
         # worker_count = min(8, os.cpu_count()),
         num_return_buckets=num_return_buckets,
         policy=policy,

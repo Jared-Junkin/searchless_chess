@@ -715,11 +715,12 @@ if __name__ == "__main__":
     ## play 100 games against each stockfish agent (50 with white, 50 with black) to test how strong the model really is
     stockfish_play_time=0.1
     num_games=50
-    player_one_recording_name=player_ones[0]
+    # player_one_recording_name=player_ones[0]
+    player_one_recording_name = "ckpt16000_causal.pt"
     DRAW_FILE = "draws.txt"
     # white
     for i in range(11):
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/home/ext-jjunkin/data_snatha11/searchless_chess/src/out/", tokenizer=CODEX.encode, decoder=CODEX.decode)
         player_two_recording_name = "stockfish" + str(i)
         # with open(DRAW_FILE, 'a') as f:
         #     f.write(f"{player_two_recording_name}\n")
@@ -727,16 +728,16 @@ if __name__ == "__main__":
         player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
         play_game(player_one, player_two, num_games)
         
-    stockfish_play_time=0.1
-    num_games=50
-    player_two_recording_name=player_ones[0]
-    DRAW_FILE = "draws.txt"
-    # black
-    for i in range(11):
-        player_two = NanoGptPlayer(model_name=player_two_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
-        player_one_recording_name = "stockfish" + str(i)
-        # with open(DRAW_FILE, 'a') as f:
-        #     f.write(f"{player_one_recording_name}\n")
-        #     f.close()
-        player_one = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
-        play_game(player_one, player_two, num_games)
+    # stockfish_play_time=0.1
+    # num_games=50
+    # player_two_recording_name=player_ones[0]
+    # DRAW_FILE = "draws.txt"
+    # # black
+    # for i in range(11):
+    #     player_two = NanoGptPlayer(model_name=player_two_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+    #     player_one_recording_name = "stockfish" + str(i)
+    #     # with open(DRAW_FILE, 'a') as f:
+    #     #     f.write(f"{player_one_recording_name}\n")
+    #     #     f.close()
+    #     player_one = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+    #     play_game(player_one, player_two, num_games)
