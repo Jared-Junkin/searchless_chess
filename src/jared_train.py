@@ -38,7 +38,7 @@ formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(messag
 file_log.setFormatter(formatter)
 # ----------------------------------------------------------------------------- Deepmind imports
 import config as config_lib
-import data_loader
+# import data_loader
 from jared_data_loader import build_data_loader_parallel
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -70,10 +70,12 @@ def get_batch(split: str) -> Tuple[torch.Tensor, torch.Tensor]:
 
     # Move batch to device
     if not isinstance(targets_tensor, torch.Tensor):
-        targets_tensor = torch.from_numpy(targets_tensor).to(device, non_blocking=True)
+        targets_tensor = torch.from_numpy(targets_tensor)
+    targets_tensor = targets_tensor.to(device)
 
     # Shift right to create inputs
     inputs_tensor: torch.Tensor = shift_right(targets_tensor)
+    
 
     return inputs_tensor, targets_tensor
 
@@ -85,7 +87,7 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
+        losses = torch.zeros(eval_iters).to(device)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
@@ -115,7 +117,7 @@ if __name__ == "__main__":
     out_dir = 'out'
     vocab_size = 1968 # number of possible legal moves in chess fen
     eval_interval = 4000
-    log_interval = 100
+    log_interval = 50
     eval_iters = 100
     eval_only = False # if True, script exits right after the first eval
     always_save_checkpoint = True # if True, always save a checkpoint after each eval
@@ -126,7 +128,7 @@ if __name__ == "__main__":
     wandb_run_name = 'gpt2' # 'run' + str(time.time())
     # data
     dataset = 'lichess_hf_dataset'
-    gradient_accumulation_steps = 2 # used to simulate larger batch sizes
+    gradient_accumulation_steps = 1 # used to simulate larger batch sizes
     batch_size = 1024 # if gradient_accumulation_steps > 1, this is the micro-batch size
     block_size = 78 # number of tokens.
     # model
@@ -137,7 +139,7 @@ if __name__ == "__main__":
     bias = False # do we use bias inside LayerNorm and Linear layers?
     # adamw optimizer
     learning_rate = 0.0003 # max learning rate
-    max_iters = 600000 # total number of training iterations
+    max_iters = 100000 # total number of training iterations
     weight_decay = 1e-1
     beta1 = 0.9
     beta2 = 0.95
@@ -145,39 +147,24 @@ if __name__ == "__main__":
     # learning rate decay settings
     decay_lr = True # whether to decay the learning rate
     warmup_iters = 2000 # how many steps to warm up for
-    lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
+    lr_decay_iters = 100000 # should be ~= max_iters per Chinchilla
     min_lr = 0.00003 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
     # DDP settings
     backend = 'nccl' # 'nccl', 'gloo', etc.
     # system
     device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-    compile = True # use PyTorch 2.0 to compile the model to be faster (jared is temporarily setting to false for debugging purposes.)
+
     # -----------------------------------------------------------------------------
     config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
     exec(open('jared_configurator.py').read()) # overrides from command line or config file
     config = {k: globals()[k] for k in config_keys} # will be useful for logging
     # -----------------------------------------------------------------------------
     # various inits, derived attributes, I/O setup
-    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
-    if ddp:
-        init_process_group(backend=backend)
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
-        device = f'cuda:{ddp_local_rank}'
-        torch.cuda.set_device(device)
-        master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-        seed_offset = ddp_rank # each process gets a different seed
-        # world_size number of processes will be training simultaneously, so we can scale
-        # down the desired gradient accumulation iterations per process proportionally
-        assert gradient_accumulation_steps % ddp_world_size == 0
-        gradient_accumulation_steps //= ddp_world_size
-    else:
-        # if not ddp, we are running on a single gpu, and one process
-        master_process = True
-        seed_offset = 0
-        ddp_world_size = 1
+
+    master_process = True
+    seed_offset = 0
+    ddp_world_size = 1
     tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
     print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
@@ -198,8 +185,8 @@ if __name__ == "__main__":
     train_data = config_lib.DataConfig(
         batch_size=batch_size,
         shuffle=True,
-        # worker_count=1,  # 0 disables multiprocessing.
-        worker_count = min(8, os.cpu_count()),
+        worker_count=0,  # 0 disables multiprocessing.
+        # worker_count = min(8, os.cpu_count()),
         num_return_buckets=num_return_buckets,
         policy=policy,
         split='train'
@@ -207,24 +194,17 @@ if __name__ == "__main__":
     test_data = config_lib.DataConfig(
         batch_size=batch_size,
         shuffle=True,
-        # worker_count=1,  # 0 disables multiprocessing.
-        worker_count = min(8, os.cpu_count()),
+        worker_count=0,  # 0 disables multiprocessing.
+        # worker_count = min(8, os.cpu_count()),
         num_return_buckets=num_return_buckets,
         policy=policy,
         split='test',
     )
     # print("reached this line")
     loader_iterators: Dict[str, Any] = {}
-    if ddp:
-        start_time = time.time()
-        train_loader=build_data_loader_parallel(config=train_data, rank=ddp_rank, world_size=ddp_world_size)
-        print(f"Created Train loader in  {time.time() - start_time} seconds")
-        start_time = time.time()
-        test_loader=build_data_loader_parallel(config=test_data, rank=ddp_rank, world_size=ddp_world_size)
-        print(f"Created Test loader in  {time.time() - start_time} seconds")
-    else:
-        train_loader=data_loader.build_data_loader(config=train_data).__iter__()
-        test_loader=data_loader.build_data_loader(config=test_data).__iter__()
+
+    train_loader=build_data_loader_parallel(config=train_data, rank=0, world_size=1)
+    test_loader=build_data_loader_parallel(config=test_data, rank=0, world_size=1)
     ## init models now. you will need to carefully adjust your model architecture to make sure that the attention mechanisms mask properly. 
     ## you mask everything except the last column for behavioral cloning.
 
@@ -288,29 +268,24 @@ if __name__ == "__main__":
         optimizer.load_state_dict(checkpoint['optimizer'])
     checkpoint = None # free up memory
 
-    # compile the model
-    if compile:
-        print("compiling the model... (takes a ~minute)")
-        unoptimized_model = model
-        model = torch.compile(model) # requires PyTorch 2.0
+    
 
-    # wrap model into DDP container
-    if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
     # logging
     if wandb_log and master_process:
         import wandb
         wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    print(train_loader)
+    print(type(train_loader))
     # training loop (first batch fetched above so we could register loss mask with torch for greater efficiency.)
     logger.info("tring to fetch first batch of data.")
     X, Y = get_batch(split="train") # fetch the very first batch 
-    logger.info("successfully fetched first batch of data.")
+    logger.info(f"successfully fetched first batch of data. X is {X}. shape {X.shape}")
 
     # print(f"input tensor is {X}\n\n\n")
     # print(f"target tensor is {Y}")
     t0 = time.time()
     local_iter_num = 0 # number of iterations in the lifetime of this process
-    raw_model = model.module if ddp else model # unwrap DDP container if needed
+    raw_model = model # unwrap DDP container if needed
     running_mfu = -1.0
     start = time.time()
     while True:
@@ -326,7 +301,7 @@ if __name__ == "__main__":
         if iter_num % eval_interval == 0 and master_process:
             losses = estimate_loss()
             print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-            # logger.info(f"iter: {iter_num}, train/loss: {losses['train']}, val/loss: {losses['val']}, lr: {lr}, mfu: {running_mfu*100}")
+            logger.info(f"iter: {iter_num}, train/loss: {losses['train']}, val/loss: {losses['val']}, lr: {lr}, mfu: {running_mfu*100}")
             if wandb_log:
                 wandb.log({
                     "iter": iter_num,
@@ -367,6 +342,7 @@ if __name__ == "__main__":
                     # csv_file_path = csv_file_path.replace(
                     #     ".", "_"
                     # )  # filenames can't have periods in them. Useful for e.g. gpt-3.5 models
+                    
                     # csv_file_path += ".csv"
                     # player_one = NanoGptPlayer(model_name=config_play['player_one_recording_name'])
                     # player_two = StockfishPlayer(skill_level=stockfish_skill, play_time=stockfish_play_time)
@@ -389,12 +365,7 @@ if __name__ == "__main__":
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
         for micro_step in range(gradient_accumulation_steps):
-            if ddp:
-                # in DDP training we only need to sync gradients at the last micro step.
-                # the official way to do this is with model.no_sync() context manager, but
-                # I really dislike that this bloats the code and forces us to repeat code
-                # looking at the source of that context manager, it just toggles this variable
-                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+
             with ctx:
                 logits, loss = model(X, Y)
                 loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
@@ -443,5 +414,4 @@ if __name__ == "__main__":
         if iter_num > max_iters:
             break
 
-    if ddp:
-        destroy_process_group()
+
