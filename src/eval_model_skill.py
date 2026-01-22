@@ -11,7 +11,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from typing import Tuple, Dict, Any
 from jared_models.nanoGPT import GPT, GPTConfig
-# from jared import JaredPT # type: ignore
+
 import logging
 logger = logging.getLogger("jaredLogger")
 logger.setLevel("DEBUG")
@@ -290,9 +290,10 @@ def calcModelSkill(checkpoint_name: str = "ckpt600000.pt", eval_iters: int = 20,
 
 if __name__=="__main__":
     ################ to evaluate loss and accuracy for the final model
-    # checkpoint_name = "ckpt600000.pt"
-    # eval_iters = 100
-    # calcModelSkill(checkpoint_name=checkpoint_name, eval_iters=eval_iters)
+    checkpoint_name = "ckpt96000_causal.pt"
+    writeFilePath="./out/performance_96000.txt"
+    eval_iters = 1
+    calcModelSkill(checkpoint_name=checkpoint_name, eval_iters=eval_iters, writeFilePath=writeFilePath)
     
     ################ to evaluate loss and accuracy of model trained across all epochs
     # ckpts = [i for i in range(4000, 602000, 8000)]
@@ -305,12 +306,12 @@ if __name__=="__main__":
     #             calcModelSkill(checkpoint_name=checkpoint_name, eval_iters=eval_iters)
     
     ############## to evaluate across all checkpoints for causal 
-    ckpts = [i for i in range(4000, 602000, 8000)]
-    writefilepath = "/workspace/searchless_chess/src/out/performance_sweep_causal.txt"
-    eval_iters = 20
-    for c in ckpts:
-        # if c>=10000:
-            checkpoint_name = "ckpt" + str(c) + "_causal.pt"
-            if os.path.exists(os.path.join("./out/", checkpoint_name)):
-                print(F"evaluating model {checkpoint_name}")
-                calcModelSkill(checkpoint_name=checkpoint_name, eval_iters=eval_iters, writeFilePath=writefilepath)
+    # ckpts = [i for i in range(4000, 602000, 8000)]
+    # writefilepath = "/workspace/searchless_chess/src/out/performance_sweep_causal.txt"
+    # eval_iters = 20
+    # for c in ckpts:
+    #     # if c>=10000:
+    #         checkpoint_name = "ckpt" + str(c) + "_causal.pt"
+    #         if os.path.exists(os.path.join("./out/", checkpoint_name)):
+    #             print(F"evaluating model {checkpoint_name}")
+    #             calcModelSkill(checkpoint_name=checkpoint_name, eval_iters=eval_iters, writeFilePath=writefilepath)
