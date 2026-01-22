@@ -77,7 +77,7 @@ class StockfishPlayer(Player):
             str: Path to the Stockfish executable based on the operating system.
         """
         if platform.system() == "Linux":
-            return "/usr/games/stockfish"
+            return "/home/ext-jjunkin/data_snatha11/searchless_chess/src/engines/stockfish"
         elif platform.system() == "Darwin":  # Darwin is the system name for macOS
             return "stockfish"
         elif platform.system() == "Windows":
@@ -521,7 +521,8 @@ def play_game(
     # NOTE: I'm being very particular with game_state formatting because I want to match the PGN notation exactly
     # It looks like this: 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 etc. HOWEVER, GPT prompts should not end with a trailing whitespace
     # due to tokenization issues. If you make changes, ensure it still matches the PGN notation exactly.
-    stockfish_path = "/usr/games/stockfish"
+    # stockfish_path = "/usr/games/stockfish"
+    stockfish_path = "/home/ext-jjunkin/data_snatha11/searchless_chess/src/engines/stockfish"
     helper = chess.engine.SimpleEngine.popen_uci(stockfish_path) # probably will need to make sure my helper has the same color as my agent
     for _ in range(max_games):  # Play 10 games
         ## commenting this out for now. but I likely will need some kind of prompt once I start training language-capable models
@@ -672,13 +673,13 @@ CODEX = InferenceTimeBehavioralCloning()
 if __name__ == "__main__":
     
     # ## playing a human game aginst the bot
-    # start = 1 # forcing human to play black
-    # if start == 0: # human is white
-    #     color = "white"
-    #     player_one = humanPlayer()
-    #     player_one_recording_name = "human"
-    #     player_two_recording_name = player_ones[0]
-    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
+    start = 0 # forcing human to play black
+    if start == 0: # human is white
+        color = "white"
+        player_one = humanPlayer()
+        player_one_recording_name = "human"
+        player_two_recording_name = player_ones[0]
+        player_two = NanoGptPlayer(model_name=player_one_recording_name, model_path="/home/ext-jjunkin/data_snatha11/searchless_chess/src/out/ckpt96000_causal.pt", tokenizer=CODEX.encode, decoder=CODEX.decode)
     # else: # human is black
     #     color = "black"
     #     player_one_recording_name = player_ones[0]
@@ -686,7 +687,7 @@ if __name__ == "__main__":
     #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/workspace/searchless_chess/src/out", tokenizer=CODEX.encode, decoder=CODEX.decode)
     #     player_two = humanPlayer()
     # print(f"Starting game against model {player_ones[0]}. You are {color}. Good luck!")
-    # play_game_human(player_one=player_one, player_two=player_two)
+    play_game_human(player_one=player_one, player_two=player_two)
     
     
     ## play 100 games against each stockfish agent to test how strong the model really is
@@ -713,20 +714,20 @@ if __name__ == "__main__":
     #     play_game(player_one, player_two, num_games)
         
     ## play 100 games against each stockfish agent (50 with white, 50 with black) to test how strong the model really is
-    stockfish_play_time=0.1
-    num_games=50
-    # player_one_recording_name=player_ones[0]
-    player_one_recording_name = "ckpt16000_causal.pt"
-    DRAW_FILE = "draws.txt"
-    # white
-    for i in range(11):
-        player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/home/ext-jjunkin/data_snatha11/searchless_chess/src/out/", tokenizer=CODEX.encode, decoder=CODEX.decode)
-        player_two_recording_name = "stockfish" + str(i)
-        # with open(DRAW_FILE, 'a') as f:
-        #     f.write(f"{player_two_recording_name}\n")
-        #     f.close()
-        player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
-        play_game(player_one, player_two, num_games)
+    # stockfish_play_time=0.1
+    # num_games=50
+    # # player_one_recording_name=player_ones[0]
+    # player_one_recording_name = "ckpt96000_causal.pt"
+    # DRAW_FILE = "draws.txt"
+    # # white
+    # for i in range(11):
+    #     player_one = NanoGptPlayer(model_name=player_one_recording_name, model_path="/home/ext-jjunkin/data_snatha11/searchless_chess/src/out/", tokenizer=CODEX.encode, decoder=CODEX.decode)
+    #     player_two_recording_name = "stockfish" + str(i)
+    #     # with open(DRAW_FILE, 'a') as f:
+    #     #     f.write(f"{player_two_recording_name}\n")
+    #     #     f.close()
+    #     player_two = StockfishPlayer(skill_level=i, play_time=stockfish_play_time)
+    #     play_game(player_one, player_two, num_games)
         
     # stockfish_play_time=0.1
     # num_games=50

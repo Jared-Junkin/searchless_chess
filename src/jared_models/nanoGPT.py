@@ -438,14 +438,7 @@ class NanoGptPlayer:
 
         # model
         if init_from == "resume":
-            # init from a model saved in a specific directory
-            # ckpt_path = os.path.join(BASE_DIR, out_dir, self.model_name)
-            if self.model_path: 
-                ckpt_path = os.path.join(self.model_path, self.model_name)
-            else:
-                ckpt_path = f"nanogpt/out/{self.model_name}" # old
-            # ckpt_path = f"out/{self.model_name}" # new
-            checkpoint = torch.load(ckpt_path, map_location=device)
+            checkpoint = torch.load(self.model_path, map_location=device)
             gptconf = GPTConfig(**checkpoint["model_args"])
 
             state_dict = checkpoint["model"]
